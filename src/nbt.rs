@@ -55,10 +55,58 @@ pub fn parse(input: &[u8]) -> io::Result<Compound> {
 }
 
 pub fn write(root: &Compound) -> io::Result<Vec<u8>> {
+    if compound_elements(root, 0)? > MAX_ELEMENTS {
+        return Err(invalid("NBT total element limit exceeded"));
+    }
     let mut out = vec![10];
     put_string("", &mut out)?;
     write_compound(root, 0, &mut out)?;
     Ok(out)
+}
+
+fn compound_elements(compound: &Compound, depth: usize) -> io::Result<usize> {
+    if depth >= MAX_DEPTH {
+        return Err(invalid("NBT nesting depth limit exceeded"));
+    }
+    let mut count = compound.0.len();
+    for (_, tag) in &compound.0 {
+        count = count
+            .checked_add(tag_elements(tag, depth + 1)?)
+            .ok_or_else(|| invalid("NBT element count overflow"))?;
+        if count > MAX_ELEMENTS {
+            return Err(invalid("NBT total element limit exceeded"));
+        }
+    }
+    Ok(count)
+}
+
+fn tag_elements(tag: &Tag, depth: usize) -> io::Result<usize> {
+    if depth >= MAX_DEPTH {
+        return Err(invalid("NBT nesting depth limit exceeded"));
+    }
+    let children = match tag {
+        Tag::ByteArray(values) => values.len(),
+        Tag::IntArray(values) => values.len(),
+        Tag::LongArray(values) => values.len(),
+        Tag::List(_, values) => {
+            let mut count = values.len();
+            for value in values {
+                count = count
+                    .checked_add(tag_elements(value, depth + 1)?)
+                    .ok_or_else(|| invalid("NBT element count overflow"))?;
+                if count > MAX_ELEMENTS {
+                    return Err(invalid("NBT total element limit exceeded"));
+                }
+            }
+            count
+        }
+        Tag::Compound(compound) => compound_elements(compound, depth + 1)?,
+        _ => 0,
+    };
+    if children > MAX_ELEMENTS {
+        return Err(invalid("NBT total element limit exceeded"));
+    }
+    Ok(children)
 }
 
 fn write_compound(compound: &Compound, depth: usize, out: &mut Vec<u8>) -> io::Result<()> {
@@ -112,6 +160,7 @@ fn write_payload(tag: &Tag, depth: usize, out: &mut Vec<u8>) -> io::Result<()> {
         Tag::ByteArray(values) => {
             put_length(values.len(), out)?;
             out.extend(values.iter().map(|value| *value as u8));
+            ensure_output_limit(out)?;
         }
         Tag::String(value) => put_string(value, out)?,
         Tag::List(kind, values) => {
@@ -140,6 +189,13 @@ fn write_payload(tag: &Tag, depth: usize, out: &mut Vec<u8>) -> io::Result<()> {
                 out.extend_from_slice(&value.to_be_bytes());
             }
         }
+    }
+    Ok(())
+}
+
+fn ensure_output_limit(out: &[u8]) -> io::Result<()> {
+    if out.len() > MAX_NBT_BYTES {
+        return Err(invalid("serialized NBT byte limit exceeded"));
     }
     Ok(())
 }
@@ -397,6 +453,12 @@ mod tests {
             "data".into(),
             Tag::ByteArray(vec![0; MAX_NBT_BYTES]),
         )]);
+        assert!(write(&root).is_err());
+    }
+
+    #[test]
+    fn rejects_writer_compound_entry_over_element_limit() {
+        let root = Compound(vec![("many".into(), Tag::List(1, vec![Tag::Byte(0); MAX_ELEMENTS]))]);
         assert!(write(&root).is_err());
     }
 

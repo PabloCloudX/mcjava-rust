@@ -20,7 +20,7 @@ The code currently validates Login Start and safely answers with Login Disconnec
 
 ## Configuration
 
-Reported 26.3 packets include serverbound Known Packs `0x07`, serverbound Acknowledge Finish Configuration `0x03`; clientbound Registry Data `0x07`, Finish Configuration `0x03`, Feature Flags `0x0C`, Update Tags `0x0D`, and Known Packs `0x0E`. Confirm every ID and payload against a pinned 26.3 reference and captured vanilla behavior before implementing.
+The current 26.3 packet reference lists serverbound Known Packs `0x07` and Acknowledge Finish Configuration `0x03`; clientbound Registry Data `0x07`, Finish Configuration `0x03`, Feature Flags `0x0D`, Update Tags `0x0E`, and Known Packs `0x0F`. IDs are state- and direction-specific. Confirm every payload against a pinned 26.3 reference and captured vanilla behavior before implementing.
 
 Registry Data contains one packet per registry. Its ordered entries assign numeric IDs; each entry has an identifier and optional NBT payload. If NBT is omitted, the client must obtain the entry from a selected known pack. Listing a pack does not imply every registry entry exists; every used entry still must be listed. Update Tags must be fully sent and cannot be resolved from known packs.
 
