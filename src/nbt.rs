@@ -137,7 +137,9 @@ impl Cursor<'_> {
             6 => Ok(Tag::Double(f64::from_bits(self.i64()? as u64))),
             7 => {
                 let len = self.length()?;
-                Ok(Tag::ByteArray(self.take(len)?.iter().map(|byte| *byte as i8).collect()))
+                Ok(Tag::ByteArray(
+                    self.take(len)?.iter().map(|byte| *byte as i8).collect(),
+                ))
             }
             8 => Ok(Tag::String(self.string()?)),
             9 => {
@@ -156,13 +158,17 @@ impl Cursor<'_> {
             11 => {
                 let len = self.length()?;
                 let mut values = Vec::with_capacity(len);
-                for _ in 0..len { values.push(self.i32()?); }
+                for _ in 0..len {
+                    values.push(self.i32()?);
+                }
                 Ok(Tag::IntArray(values))
             }
             12 => {
                 let len = self.length()?;
                 let mut values = Vec::with_capacity(len);
-                for _ in 0..len { values.push(self.i64()?); }
+                for _ in 0..len {
+                    values.push(self.i64()?);
+                }
                 Ok(Tag::LongArray(values))
             }
             _ => Err(invalid("unknown NBT tag type")),
