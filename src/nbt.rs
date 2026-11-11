@@ -393,7 +393,10 @@ mod tests {
 
     #[test]
     fn rejects_writer_output_over_byte_limit() {
-        let root = Compound(vec![("data".into(), Tag::ByteArray(vec![0; MAX_NBT_BYTES]))]);
+        let root = Compound(vec![(
+            "data".into(),
+            Tag::ByteArray(vec![0; MAX_NBT_BYTES]),
+        )]);
         assert!(write(&root).is_err());
     }
 
