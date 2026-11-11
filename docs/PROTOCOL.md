@@ -10,6 +10,10 @@ Target: Java Edition 26.3, protocol 777. See [`research/protocol-26.3.md`](resea
 - Ping (`0x01`) and byte-for-byte Pong echo with 8-byte timestamp payload.
 - On GitHub Actions: Rust unit tests, lint, and x86_64 release build. On VPS: downloaded release binary passed a raw TCP status and ping/pong exchange.
 
+## Login request handling
+
+The server parses the Login Start packet (`0x00` clientbound-to-server in Login state), validating the username byte length, UTF-8, and 16-byte UUID field. It then returns a Login Disconnect (`0x00` serverbound-to-client in Login state) stating that login is not implemented. This is an intentional safe rejection, not a login success.
+
 ## Not implemented
 
-Login, encryption, compression, Configuration, Play, registry synchronization, client compatibility testing, player connection, chunks, and gameplay. A protocol number in the status JSON is not a claim that those protocol states work.
+Authentication, encryption, compression, Login Success, Configuration, Play, registry synchronization, client join testing, player connection, chunks, and gameplay. A protocol number in the status JSON is not a claim that those protocol states work.

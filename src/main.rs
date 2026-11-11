@@ -78,9 +78,36 @@ fn serve(mut stream: TcpStream) -> io::Result<()> {
     let (_protocol, next_state) = parse_handshake(&handshake)?;
     match next_state {
         1 => status(&mut stream),
-        2 => send_disconnect(&mut stream, "Login is not implemented yet"),
+        2 => login(&mut stream),
         _ => Err(invalid("unsupported next state")),
     }
+}
+
+fn login(stream: &mut TcpStream) -> io::Result<()> {
+    let start = read_frame(stream)?;
+    parse_login_start(&start)?;
+    send_disconnect(stream, "Login is not implemented yet")
+}
+
+fn parse_login_start(packet: &[u8]) -> io::Result<(&str, [u8; 16])> {
+    let mut cursor = 0;
+    if read_varint(packet, &mut cursor)? != 0 {
+        return Err(invalid("expected login start packet"));
+    }
+    let name_len = read_varint(packet, &mut cursor)?;
+    if !(1..=16).contains(&name_len) || cursor + name_len as usize + 16 != packet.len() {
+        return Err(invalid("invalid login name length or packet size"));
+    }
+    let name = std::str::from_utf8(&packet[cursor..cursor + name_len as usize])
+        .map_err(|_| invalid("login name is not valid UTF-8"))?;
+    if name.chars().any(|character| character.is_control()) {
+        return Err(invalid("login name contains control characters"));
+    }
+    cursor += name_len as usize;
+    let uuid: [u8; 16] = packet[cursor..]
+        .try_into()
+        .map_err(|_| invalid("login start UUID must be 16 bytes"))?;
+    Ok((name, uuid))
 }
 
 fn status(stream: &mut TcpStream) -> io::Result<()> {
@@ -234,5 +261,24 @@ mod tests {
         let host = "😀".repeat(128);
         let handshake = handshake_bytes(host.as_bytes());
         assert!(parse_handshake(&handshake).is_err());
+    }
+
+    #[test]
+    fn parses_login_start_name_and_uuid() {
+        let mut packet = vec![0];
+        put_varint(4, &mut packet);
+        packet.extend_from_slice(b"Test");
+        packet.extend(0u8..16);
+        let (name, uuid) = parse_login_start(&packet).unwrap();
+        assert_eq!(name, "Test");
+        assert_eq!(uuid, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    }
+
+    #[test]
+    fn rejects_malformed_login_start() {
+        assert!(parse_login_start(&[0, 0]).is_err());
+        let mut packet = vec![0, 1, 0xff];
+        packet.extend([0; 16]);
+        assert!(parse_login_start(&packet).is_err());
     }
 }

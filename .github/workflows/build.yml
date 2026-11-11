@@ -2,7 +2,7 @@ name: Build
 on:
   push:
     branches: [main]
-    paths: ['Cargo.toml', 'Cargo.lock', 'src/**', '.github/workflows/build.yml']
+    paths: ['Cargo.toml', 'Cargo.lock', 'src/**', 'docs/**', 'README.md', 'scripts/**', '.github/workflows/build.yml']
   release:
     types: [published]
   pull_request:
