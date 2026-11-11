@@ -34,7 +34,11 @@ pub enum Tag {
 }
 
 pub fn parse(input: &[u8]) -> io::Result<Compound> {
-    let mut cursor = Cursor { bytes: input, pos: 0, elements: 0 };
+    let mut cursor = Cursor {
+        bytes: input,
+        pos: 0,
+        elements: 0,
+    };
     if cursor.byte()? != 10 {
         return Err(invalid("NBT root tag is not a compound"));
     }
