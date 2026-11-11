@@ -6,6 +6,7 @@ import struct
 import subprocess
 import sys
 import time
+import time
 
 
 def varint(value):
@@ -133,14 +134,16 @@ def main():
         status_test("127.0.0.1", port)
         login_test("127.0.0.1", port)
         if offline_mode:
-            public_bind = subprocess.run(
+            public_bind = subprocess.Popen(
                 [binary, "0.0.0.0:0"],
                 env=server_env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
-                timeout=3,
             )
-            if public_bind.returncode == 0:
+            time.sleep(0.1)
+            if public_bind.poll() is None:
+                public_bind.terminate()
+                public_bind.wait(timeout=2)
                 raise AssertionError("offline mode unexpectedly allowed public bind")
     finally:
         process.terminate()
