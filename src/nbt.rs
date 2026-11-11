@@ -2,6 +2,7 @@ use std::io;
 
 const MAX_DEPTH: usize = 64;
 const MAX_ELEMENTS: usize = 1_000_000;
+const MAX_NBT_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, PartialEq)]
 pub struct Compound(pub Vec<(String, Tag)>);
@@ -34,6 +35,9 @@ pub enum Tag {
 }
 
 pub fn parse(input: &[u8]) -> io::Result<Compound> {
+    if input.len() > MAX_NBT_BYTES {
+        return Err(invalid("NBT input byte limit exceeded"));
+    }
     let mut cursor = Cursor {
         bytes: input,
         pos: 0,
@@ -66,9 +70,12 @@ fn write_compound(compound: &Compound, depth: usize, out: &mut Vec<u8>) -> io::R
         out.push(kind);
         put_string(name, out)?;
         write_payload(tag, depth + 1, out)?;
-        if out.len() > MAX_ELEMENTS * 16 {
+        if out.len() > MAX_NBT_BYTES {
             return Err(invalid("serialized NBT byte limit exceeded"));
         }
+    }
+    if out.len() >= MAX_NBT_BYTES {
+        return Err(invalid("serialized NBT byte limit exceeded"));
     }
     out.push(0);
     Ok(())
@@ -380,6 +387,17 @@ mod tests {
     }
 
     #[test]
+    fn rejects_oversized_nbt_document() {
+        assert!(parse(&vec![0; MAX_NBT_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn rejects_writer_output_over_byte_limit() {
+        let root = Compound(vec![("data".into(), Tag::ByteArray(vec![0; MAX_NBT_BYTES]))]);
+        assert!(write(&root).is_err());
+    }
+
+    #[test]
     fn rejects_truncated_integer_payload() {
         let input = [10, 0, 0, 3, 0, 1, b'x', 0, 0];
         assert!(parse(&input).is_err());
@@ -415,6 +433,13 @@ mod tests {
         ];
         let root = parse(&input).unwrap();
         assert_eq!(root.0, vec![("😀".to_string(), Tag::String(String::new()))]);
+    }
+
+    #[test]
+    fn writer_round_trips_modified_utf8_strings() {
+        let root = Compound(vec![("nul\\0😀".into(), Tag::String("😀\\0".into()))]);
+        let encoded = write(&root).unwrap();
+        assert_eq!(parse(&encoded).unwrap(), root);
     }
 
     #[test]
