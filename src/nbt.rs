@@ -300,3 +300,4 @@ mod tests {
         assert!(modified_utf8(&[0xed, 0xa0, 0x80]).is_err());
     }
 }
+
