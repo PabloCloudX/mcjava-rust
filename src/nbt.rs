@@ -191,7 +191,9 @@ fn modified_utf8(data: &[u8]) -> io::Result<String> {
         match first {
             1..=0x7f => units.push(first as u16),
             0xc0..=0xdf => {
-                let second = *data.get(pos).ok_or_else(|| invalid("truncated modified UTF-8"))?;
+                let second = *data
+                    .get(pos)
+                    .ok_or_else(|| invalid("truncated modified UTF-8"))?;
                 pos += 1;
                 if second & 0xc0 != 0x80 {
                     return Err(invalid("invalid modified UTF-8 continuation byte"));
@@ -206,8 +208,12 @@ fn modified_utf8(data: &[u8]) -> io::Result<String> {
                 units.push(value);
             }
             0xe0..=0xef => {
-                let second = *data.get(pos).ok_or_else(|| invalid("truncated modified UTF-8"))?;
-                let third = *data.get(pos + 1).ok_or_else(|| invalid("truncated modified UTF-8"))?;
+                let second = *data
+                    .get(pos)
+                    .ok_or_else(|| invalid("truncated modified UTF-8"))?;
+                let third = *data
+                    .get(pos + 1)
+                    .ok_or_else(|| invalid("truncated modified UTF-8"))?;
                 pos += 2;
                 if second & 0xc0 != 0x80 || third & 0xc0 != 0x80 {
                     return Err(invalid("invalid modified UTF-8 continuation byte"));
