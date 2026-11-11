@@ -64,6 +64,20 @@ pub fn write(root: &Compound) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
+pub fn write_network_tag(tag: &Tag) -> io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    out.push(tag_kind(tag));
+    write_payload(tag, 0, &mut out)?;
+    if out.len() > MAX_NBT_BYTES {
+        return Err(invalid("serialized NBT byte limit exceeded"));
+    }
+    Ok(out)
+}
+
+pub fn text_component(text: &str) -> io::Result<Vec<u8>> {
+    write_network_tag(&Tag::String(text.to_owned()))
+}
+
 fn compound_elements(compound: &Compound, depth: usize) -> io::Result<usize> {
     if depth >= MAX_DEPTH {
         return Err(invalid("NBT nesting depth limit exceeded"));
@@ -440,6 +454,26 @@ mod tests {
         let encoded = write(&root).unwrap();
         assert_eq!(encoded, [10, 0, 0, 3, 0, 1, b'x', 0, 0, 0, 42, 0]);
         assert_eq!(parse(&encoded).unwrap(), root);
+    }
+
+    #[test]
+    fn network_text_component_is_unnamed_string_tag() {
+        assert_eq!(text_component("Hi").unwrap(), [8, 0, 2, b'H', b'i']);
+    }
+
+    #[test]
+    fn network_text_component_uses_modified_utf8() {
+        assert_eq!(text_component("é").unwrap(), [8, 0, 2, 0xc3, 0xa9]);
+        assert_eq!(text_component("\0").unwrap(), [8, 0, 2, 0xc0, 0x80]);
+    }
+
+    #[test]
+    fn network_compound_tag_omits_root_name() {
+        let tag = Tag::Compound(Compound(vec![("text".into(), Tag::String("Hi".into()))]));
+        assert_eq!(
+            write_network_tag(&tag).unwrap(),
+            [10, 8, 0, 4, b't', b'e', b'x', b't', 0, 2, b'H', b'i', 0]
+        );
     }
 
     #[test]

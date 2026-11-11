@@ -177,7 +177,7 @@ fn login_success_packet(name: &str, uuid: [u8; 16]) -> io::Result<Vec<u8>> {
 
 fn send_configuration_disconnect(stream: &mut TcpStream, reason: &str) -> io::Result<()> {
     let mut data = vec![2];
-    put_string(&text_component(reason), &mut data)?;
+    data.extend_from_slice(&nbt::text_component(reason)?);
     write_frame(stream, &data)
 }
 

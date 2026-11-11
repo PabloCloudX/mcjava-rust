@@ -3,7 +3,7 @@
 Milestones are not complete until their acceptance criteria have been tested with a matching Minecraft Java client.
 
 1. **Foundation / status**: frame codec, status response and ping/pong. CI tests, lint, x86_64 release build pass; deployed binary was tested over external TCP. Matching Minecraft client test is outstanding.
-2. **Login and connection**: status/login, opt-in offline Login Success, protocol 777 and username validation, JSON text-component escaping, and a public-bind refusal with explicit override. Authentication, encryption/compression, session acceptance, Configuration, and successful Play remain unimplemented. The plan is an independently written Rust implementation using the official 26.3 server JAR and data as local behavioral/schema references, not a Java-to-Rust decompilation or an alternate server project.
+2. **Login and connection**: status/login, opt-in offline Login Success, protocol 777 and username validation, JSON Login Disconnect, NBT Configuration Disconnect, and a public-bind refusal with explicit override. Authentication, encryption/compression, session acceptance, Configuration, and successful Play remain unimplemented. The plan is an independently written Rust implementation using the official 26.3 server JAR and data as local behavioral/schema references, not a Java-to-Rust decompilation or an alternate server project.
 
 ## Current implementation gate
 

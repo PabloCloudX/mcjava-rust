@@ -91,6 +91,14 @@ def decode_text_component(packet):
     return json.loads(packet[offset : offset + length].decode())
 
 
+def decode_nbt_text_component(packet):
+    if len(packet) < 4 or packet[1] != 8:
+        raise AssertionError(f"expected NBT String Tag, got {packet[:8]!r}")
+    length = int.from_bytes(packet[2:4], "big")
+    if len(packet) != 4 + length:
+        raise AssertionError(f"NBT String Tag length mismatch: {len(packet)} != {4 + length}")
+    return packet[4:].decode("utf-8")
+
 def expect_disconnect(packet, packet_id, needle=None):
     if not packet or packet[0] != packet_id:
         raise AssertionError(f"expected disconnect packet id {packet_id}, got {packet[:8]!r}")
@@ -143,7 +151,10 @@ def login_test(host, port):
                 raise AssertionError(
                     f"expected Configuration Disconnect, got {config_disconnect[:8]!r}"
                 )
-            print("Login Acknowledged handled; expected Configuration Disconnect received")
+            reason = decode_nbt_text_component(config_disconnect)
+            if "Configuration" not in reason:
+                raise AssertionError(f"unexpected Configuration Disconnect reason: {reason!r}")
+            print("Login Acknowledged handled; NBT Configuration Disconnect received")
         else:
             expect_disconnect(response, 0, "Offline login is disabled")
             print("offline login disabled; expected Login Disconnect received")

@@ -11,6 +11,7 @@ Packet IDs are state- and direction-specific.
 ## Login
 
 - Clientbound Login Disconnect is packet `0x00` with a JSON text component.
+- Clientbound Configuration Disconnect is packet `0x02` with a Text Component encoded as NBT. Plain text is an unnamed String Tag (`0x08` + modified UTF-8 length/body), not JSON.
 - Serverbound Login Start is packet `0x00`, username string and 16-byte UUID.
 - Clientbound Login Success is packet `0x02` with profile UUID, username, property array, and session UUID as described by the current packet table.
 - Serverbound Login Acknowledged is packet `0x03`, no fields; transitions into Configuration.

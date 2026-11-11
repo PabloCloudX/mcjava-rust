@@ -4,8 +4,8 @@
 |---|---|---|---|---|
 | Mojang 26.3 version verification | Orchestrator | COMPLETED | Official metadata checked; server archive SHA-1 verified; protocol 777/world version 5023 recorded | Proprietary JAR is local reference only |
 | TCP status and ping | Orchestrator | REVIEW_REQUIRED | Status/ping verified on VPS previously; protocol smoke test runs in CI | No matching Java client test |
-| Offline Login Success | Orchestrator | REVIEW_REQUIRED | Login Success packet builder, protocol 777 check, username charset validation, JSON escaping, public-bind refusal with explicit override, and wire smoke checks | Local unit/smoke tests pass; needs CI verification; unauthenticated, then disconnects in Configuration; no online auth |
-| Protocol/login hardening | Orchestrator | REVIEW_REQUIRED | Ping/pong, wrong-protocol, invalid-username, public-bind refusal, and public-bind override smoke tests; JSON text-component escaping | CI pending; no matching Java client test |
+| Offline Login Success | Orchestrator | REVIEW_REQUIRED | Login Success packet builder, protocol 777 check, username charset validation, JSON Login Disconnect, NBT Configuration Disconnect, public-bind refusal with explicit override, and wire smoke checks | Local unit/smoke tests pass; needs CI verification; unauthenticated, then disconnects in Configuration; no online auth |
+| Protocol/login hardening | Orchestrator | REVIEW_REQUIRED | Ping/pong, wrong-protocol, invalid-username, public-bind refusal, and public-bind override smoke tests; JSON and NBT text-component encoding | CI pending; no matching Java client test |
 | Big-endian NBT read/write | Orchestrator | IN_PROGRESS | Compound, primitives, arrays/lists, modified UTF-8; bounded document/depth/elements and round-trip tests; Build/Test/Lint passed at `fc63b31` | No compression wrappers or registry protocol encoder |
 | Configuration / registries / tags | Unassigned | NOT_STARTED | Research notes and local 26.3 data available in ignored `.local/` | No wire packets implemented |
 | Play / chunk / world | Unassigned | NOT_STARTED | None | Not playable |
