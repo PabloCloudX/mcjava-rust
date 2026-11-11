@@ -98,7 +98,7 @@ impl Cursor<'_> {
     fn string(&mut self) -> io::Result<String> {
         let len = self.u16()? as usize;
         let data = self.take(len)?;
-        String::from_utf8(data.to_vec()).map_err(|_| invalid("NBT string is not valid UTF-8"))
+        modified_utf8(data)
     }
 
     fn compound(&mut self, depth: usize) -> io::Result<Compound> {
@@ -125,6 +125,9 @@ impl Cursor<'_> {
     }
 
     fn payload(&mut self, kind: u8, depth: usize) -> io::Result<Tag> {
+        if depth >= MAX_DEPTH {
+            return Err(invalid("NBT nesting depth limit exceeded"));
+        }
         match kind {
             1 => Ok(Tag::Byte(self.byte()? as i8)),
             2 => Ok(Tag::Short(self.u16()? as i16)),
@@ -139,6 +142,9 @@ impl Cursor<'_> {
             8 => Ok(Tag::String(self.string()?)),
             9 => {
                 let element_kind = self.byte()?;
+                if !(1..=12).contains(&element_kind) {
+                    return Err(invalid("unknown NBT list element type"));
+                }
                 let len = self.length()?;
                 if element_kind == 0 && len != 0 {
                     return Err(invalid("non-empty NBT list cannot contain End tags"));
@@ -165,6 +171,50 @@ impl Cursor<'_> {
             _ => Err(invalid("unknown NBT tag type")),
         }
     }
+}
+
+fn modified_utf8(data: &[u8]) -> io::Result<String> {
+    let mut units = Vec::with_capacity(data.len());
+    let mut pos = 0;
+    while pos < data.len() {
+        let first = data[pos];
+        pos += 1;
+        match first {
+            1..=0x7f => units.push(first as u16),
+            0xc0..=0xdf => {
+                let second = *data.get(pos).ok_or_else(|| invalid("truncated modified UTF-8"))?;
+                pos += 1;
+                if second & 0xc0 != 0x80 {
+                    return Err(invalid("invalid modified UTF-8 continuation byte"));
+                }
+                let value = (((first & 0x1f) as u16) << 6) | (second & 0x3f) as u16;
+                if value != 0 && value < 0x80 {
+                    return Err(invalid("overlong modified UTF-8 sequence"));
+                }
+                if value == 0 && (first != 0xc0 || second != 0x80) {
+                    return Err(invalid("invalid modified UTF-8 NUL"));
+                }
+                units.push(value);
+            }
+            0xe0..=0xef => {
+                let second = *data.get(pos).ok_or_else(|| invalid("truncated modified UTF-8"))?;
+                let third = *data.get(pos + 1).ok_or_else(|| invalid("truncated modified UTF-8"))?;
+                pos += 2;
+                if second & 0xc0 != 0x80 || third & 0xc0 != 0x80 {
+                    return Err(invalid("invalid modified UTF-8 continuation byte"));
+                }
+                let value = (((first & 0x0f) as u16) << 12)
+                    | (((second & 0x3f) as u16) << 6)
+                    | (third & 0x3f) as u16;
+                if value < 0x800 {
+                    return Err(invalid("overlong modified UTF-8 sequence"));
+                }
+                units.push(value);
+            }
+            _ => return Err(invalid("invalid modified UTF-8 leading byte")),
+        }
+    }
+    String::from_utf16(&units).map_err(|_| invalid("unpaired UTF-16 surrogate in modified UTF-8"))
 }
 
 fn invalid(message: &'static str) -> io::Error {
@@ -200,10 +250,7 @@ mod tests {
         for _ in 0..70 {
             input.extend([9, 0, 0, 0, 1]);
         }
-        input.push(1);
-        input.push(0);
-        input.extend([0; 3]);
-        input.push(0);
+        input.extend([1, 0]);
         assert!(parse(&input).is_err());
     }
 
@@ -215,8 +262,20 @@ mod tests {
     }
 
     #[test]
+    fn decodes_java_modified_utf8_surrogate_pair() {
+        let input = [10, 0, 0, 8, 0, 6, 0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80, 0, 0];
+        let root = parse(&input).unwrap();
+        assert_eq!(root.0, vec![("😀".to_string(), Tag::String(String::new()))]);
+    }
+
+    #[test]
     fn rejects_unknown_empty_list_element_type() {
         let input = [10, 0, 0, 9, 0, 1, b'l', 13, 0, 0, 0, 0, 0];
         assert!(parse(&input).is_err());
+    }
+
+    #[test]
+    fn rejects_unpaired_modified_utf8_surrogate() {
+        assert!(modified_utf8(&[0xed, 0xa0, 0x80]).is_err());
     }
 }
