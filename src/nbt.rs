@@ -147,7 +147,8 @@ fn put_length(len: usize, out: &mut Vec<u8>) -> io::Result<()> {
 
 fn put_string(value: &str, out: &mut Vec<u8>) -> io::Result<()> {
     let encoded = encode_modified_utf8(value)?;
-    let len = u16::try_from(encoded.len()).map_err(|_| invalid("NBT string exceeds 65535 bytes"))?;
+    let len =
+        u16::try_from(encoded.len()).map_err(|_| invalid("NBT string exceeds 65535 bytes"))?;
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(&encoded);
     Ok(())
