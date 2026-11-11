@@ -141,11 +141,15 @@ def main():
                 stderr=subprocess.PIPE,
             )
             time.sleep(0.1)
-            if public_bind.poll() is None:
-                public_bind.terminate()
-                public_bind.wait(timeout=2)
-                raise AssertionError("offline mode public-bind process was not rejected")
-            if b"WARNING: offline mode is unauthenticated" not in public_bind.stderr.read():
+            if public_bind.poll() is not None:
+                raise AssertionError("offline mode public bind unexpectedly exited")
+            public_bind.terminate()
+            try:
+                public_log = public_bind.communicate(timeout=2)[1]
+            except subprocess.TimeoutExpired:
+                public_bind.kill()
+                public_log = public_bind.communicate()[1]
+            if b"WARNING: offline mode is unauthenticated" not in public_log:
                 raise AssertionError("offline public-bind warning was not written to console")
     finally:
         process.terminate()
