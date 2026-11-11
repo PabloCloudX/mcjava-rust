@@ -89,7 +89,7 @@ fn status(stream: &mut TcpStream) -> io::Result<()> {
         return Err(invalid("expected status request"));
     }
     let mut response = vec![0];
-    put_string(&mut response, STATUS_JSON)?;
+    put_string(STATUS_JSON, &mut response)?;
     write_frame(stream, &response)?;
 
     let ping = read_frame(stream)?;
@@ -101,7 +101,7 @@ fn status(stream: &mut TcpStream) -> io::Result<()> {
 
 fn send_disconnect(stream: &mut TcpStream, reason: &str) -> io::Result<()> {
     let mut data = vec![0];
-    put_string(&mut data, &format!("{{\"text\":\"{reason}\"}}"))?;
+    put_string(&format!("{{\"text\":\"{reason}\"}}"), &mut data)?;
     write_frame(stream, &data)
 }
 
