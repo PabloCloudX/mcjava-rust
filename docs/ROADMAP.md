@@ -4,6 +4,10 @@ Milestones are not complete until their acceptance criteria have been tested wit
 
 1. **Foundation / status**: frame codec, status response and ping/pong. CI tests, lint, x86_64 release build pass; deployed binary was tested over external TCP. Matching Minecraft client test is outstanding.
 2. **Login and connection**: current code parses Login Start and explicitly disconnects. Authentication, encryption/compression, session acceptance, Configuration, and successful Login remain unimplemented. The plan is an independently written Rust implementation using the official 26.3 server JAR and data as local behavioral/schema references, not a Java-to-Rust decompilation or an alternate server project.
+
+## Current implementation gate
+
+NBT has a first bounded big-endian reader in `src/nbt.rs`; it is not yet wired into world loading or protocol registry emission. CI passed for parser-focused tests, formatting, Clippy, and x86_64 build at commit `497e266`. The next acceptance gate is registry NBT conversion and a real 26.3 client reaching Play, not a server-list ping.
 3. **World and chunks**: registry synchronization, dimension and chunk data accepted by client.
 4. **Movement**: movement, collision, synchronization, persistence.
 5. **Basic gameplay**: block interaction, inventory, crafting and survival/creative mechanics.

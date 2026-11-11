@@ -2,10 +2,12 @@
 
 | Feature | Owner | Status | Implementation / test / integration | Limitations |
 |---|---|---|---|---|
-| Mojang 26.3 metadata verification | Orchestrator | COMPLETED | Official manifest entry checked; downloaded server JAR SHA-1 verified; embedded protocol 777 and world version 5023 recorded | JAR remains in `/tmp`, not project |
-| Status handshake / response / ping echo | Orchestrator | REVIEW_REQUIRED | GitHub Actions test, lint, x86_64 build passed; deployed binary on VPS passed external raw TCP status check | Actual Minecraft client test pending; login/gameplay unsupported |
-| GitHub Actions build/test/lint workflows | Orchestrator | IN_PROGRESS | Workflows updated to run Python TCP smoke checks; the prior CI baseline at `df03fff` passed | New smoke workflow run pending; ARM64 deferred |
-| Login Start parsing / explicit rejection | Orchestrator | REVIEW_REQUIRED | CI tests/lint/build passed at `df03fff`; smoke harness verified Status and Login Disconnect against the release binary | Matching-client test pending; no authentication or successful login |
-| World/chunks/gameplay/storage | Unassigned | NOT_STARTED | Official 26.3 data archive inventory documented locally | No Rust implementation; Mojang data not committed |
+| Mojang 26.3 version verification | Orchestrator | COMPLETED | Official metadata checked; server archive SHA-1 verified; protocol 777/world version 5023 recorded | Proprietary JAR is local reference only |
+| TCP status and ping | Orchestrator | REVIEW_REQUIRED | Status/ping verified on VPS previously; protocol smoke test runs in CI | No matching Java client test |
+| Login Start parse / rejection | Orchestrator | REVIEW_REQUIRED | Validated Login Start parser and explicit Login Disconnect; smoke test in CI | Authentication and successful login are absent |
+| Big-endian NBT reader | Orchestrator | IN_PROGRESS | Compound, primitive, arrays, lists, bounds and modified UTF-8 reader; CI tests passed at commit `497e266` | No NBT writer, gzip/zlib wrappers, full Java NBT interoperability fixture suite, or protocol registry encoder |
+| Configuration / registries / tags | Unassigned | NOT_STARTED | Research notes and local 26.3 data available in ignored `.local/` | No wire packets implemented |
+| Play / chunk / world | Unassigned | NOT_STARTED | None | Not playable |
+| VPS runtime | Orchestrator | REVIEW_REQUIRED | Current deployed VPS binary is earlier status/login-reject build | Do not deploy unverified playable claims |
 
-Status deliberately reflects evidence. No phase is complete, and the initial code is not claimed to compile or pass tests until CI runs.
+No playable milestone is complete. A passing build is not client compatibility.
