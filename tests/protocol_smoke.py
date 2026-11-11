@@ -144,7 +144,9 @@ def main():
             if public_bind.poll() is None:
                 public_bind.terminate()
                 public_bind.wait(timeout=2)
-                raise AssertionError("offline mode unexpectedly allowed public bind")
+                raise AssertionError("offline mode public-bind process was not rejected")
+            if b"WARNING: offline mode is unauthenticated" not in public_bind.stderr.read():
+                raise AssertionError("offline public-bind warning was not written to console")
     finally:
         process.terminate()
         try:
