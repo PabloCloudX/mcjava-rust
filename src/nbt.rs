@@ -8,10 +8,12 @@ pub struct Compound(pub Vec<(String, Tag)>);
 
 impl Compound {
     pub fn get_int(&self, name: &str) -> Option<i32> {
-        self.0.iter().find_map(|(key, tag)| match (key.as_str(), tag) {
-            (key, Tag::Int(value)) if key == name => Some(*value),
-            _ => None,
-        })
+        self.0
+            .iter()
+            .find_map(|(key, tag)| match (key.as_str(), tag) {
+                (key, Tag::Int(value)) if key == name => Some(*value),
+                _ => None,
+            })
     }
 }
 
