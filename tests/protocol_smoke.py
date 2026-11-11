@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 import socket
 import struct
 import subprocess
@@ -80,23 +81,28 @@ def status_test(host, port):
     print("status response: 26.3 / protocol 777")
 
 
-def login_rejection_test(host, port):
+def login_test(host, port):
     login_start = b"\x00" + varint(4) + b"Test" + bytes(range(16))
-    response = request(host, port, 2, login_start)
-    if not response or response[0] != 0:
-        raise AssertionError(f"expected Login Disconnect, got {response[:8]!r}")
-    length, shift, offset = 0, 0, 1
-    while True:
-        byte = response[offset]
-        offset += 1
-        length |= (byte & 0x7F) << shift
-        shift += 7
-        if not byte & 0x80:
-            break
-    reason = json.loads(response[offset:offset + length])
-    if "not implemented" not in reason.get("text", "").lower():
-        raise AssertionError(f"unexpected login result: {reason}")
-    print("Login Start parsed; expected explicit Login Disconnect received")
+    with socket.create_connection((host, port), timeout=3) as sock:
+        sock.settimeout(3)
+        send_frame(sock, handshake(host, port, 2))
+        send_frame(sock, login_start)
+        response = read_frame(sock)
+        if os.environ.get("MC_OFFLINE_MODE") == "1":
+            if not response or response[0] != 2:
+                raise AssertionError(f"expected Login Success, got {response[:8]!r}")
+            if response[1:17] != bytes(range(16)):
+                raise AssertionError("Login Success UUID does not match Login Start")
+            print("offline Login Success received")
+            send_frame(sock, b"\x03")
+            config_disconnect = read_frame(sock)
+            if not config_disconnect or config_disconnect[0] != 2:
+                raise AssertionError(f"expected Configuration Disconnect, got {config_disconnect[:8]!r}")
+            print("Login Acknowledged handled; expected Configuration Disconnect received")
+        else:
+            if not response or response[0] != 0:
+                raise AssertionError(f"expected Login Disconnect, got {response[:8]!r}")
+            print("offline login disabled; expected Login Disconnect received")
 
 
 def main():
@@ -104,7 +110,14 @@ def main():
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    process = subprocess.Popen([binary, f"127.0.0.1:{port}"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    server_env = os.environ.copy()
+    offline_mode = server_env.get("MC_OFFLINE_MODE") == "1"
+    process = subprocess.Popen(
+        [binary, f"127.0.0.1:{port}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env=server_env,
+    )
     try:
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -118,7 +131,17 @@ def main():
         else:
             raise TimeoutError("server did not open its listener")
         status_test("127.0.0.1", port)
-        login_rejection_test("127.0.0.1", port)
+        login_test("127.0.0.1", port)
+        if offline_mode:
+            public_bind = subprocess.run(
+                [binary, "0.0.0.0:0"],
+                env=server_env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=3,
+            )
+            if public_bind.returncode == 0:
+                raise AssertionError("offline mode unexpectedly allowed public bind")
     finally:
         process.terminate()
         try:

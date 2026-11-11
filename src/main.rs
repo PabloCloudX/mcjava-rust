@@ -1,7 +1,7 @@
 mod nbt;
 
 use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -18,7 +18,17 @@ fn main() -> io::Result<()> {
     let address = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:25565".into());
-    let listener = TcpListener::bind(&address)?;
+    let offline_mode = std::env::var("MC_OFFLINE_MODE").as_deref() == Ok("1");
+    let bind_addr: SocketAddr = address
+        .parse()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "listen address must be an IP:port socket address"))?;
+    if offline_mode && !bind_addr.ip().is_loopback() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "refusing unauthenticated offline login on a non-loopback bind address",
+        ));
+    }
+    let listener = TcpListener::bind(bind_addr)?;
     eprintln!("Minecraft Rust Server status listener on {address} (protocol {PROTOCOL})");
     eprintln!("Independent project. Not affiliated with, endorsed by, or contributed to by Mojang or Microsoft.");
     eprintln!("Minecraft Java Edition is a Mojang/Microsoft product. This server does not yet implement login or gameplay.");
@@ -92,8 +102,36 @@ fn serve(mut stream: TcpStream) -> io::Result<()> {
 
 fn login(stream: &mut TcpStream) -> io::Result<()> {
     let start = read_frame(stream)?;
-    parse_login_start(&start)?;
-    send_disconnect(stream, "Login is not implemented yet")
+    let (name, uuid) = parse_login_start(&start)?;
+    if std::env::var("MC_OFFLINE_MODE").as_deref() != Ok("1") {
+        return send_disconnect(stream, "Offline login is disabled; set MC_OFFLINE_MODE=1 only on a trusted private network");
+    }
+    eprintln!("WARNING: offline mode does not authenticate players; usernames and UUIDs can be spoofed.");
+    send_login_success(stream, name, uuid)?;
+    let acknowledgement = read_frame(stream)?;
+    if acknowledgement != [3] {
+        return Err(invalid("expected Login Acknowledged packet"));
+    }
+    send_configuration_disconnect(stream, "Configuration and gameplay are not implemented yet")
+}
+
+fn send_login_success(stream: &mut TcpStream, name: &str, uuid: [u8; 16]) -> io::Result<()> {
+    write_frame(stream, &login_success_packet(name, uuid)?)
+}
+
+fn login_success_packet(name: &str, uuid: [u8; 16]) -> io::Result<Vec<u8>> {
+    let mut data = vec![2];
+    data.extend_from_slice(&uuid);
+    put_string(name, &mut data)?;
+    put_varint(0, &mut data);
+    data.extend_from_slice(&[0; 16]);
+    Ok(data)
+}
+
+fn send_configuration_disconnect(stream: &mut TcpStream, reason: &str) -> io::Result<()> {
+    let mut data = vec![2];
+    put_string(&format!("{{\"text\":\"{reason}\"}}"), &mut data)?;
+    write_frame(stream, &data)
 }
 
 fn parse_login_start(packet: &[u8]) -> io::Result<(&str, [u8; 16])> {
@@ -268,6 +306,28 @@ mod tests {
         let host = "😀".repeat(128);
         let handshake = handshake_bytes(host.as_bytes());
         assert!(parse_handshake(&handshake).is_err());
+    }
+
+    #[test]
+    fn refuses_offline_login_on_non_loopback_addresses() {
+        assert!(!"0.0.0.0:25565".parse::<SocketAddr>().unwrap().ip().is_loopback());
+        assert!(!"[::]:25565".parse::<SocketAddr>().unwrap().ip().is_loopback());
+        assert!("127.0.0.1:25565".parse::<SocketAddr>().unwrap().ip().is_loopback());
+        assert!("[::1]:25565".parse::<SocketAddr>().unwrap().ip().is_loopback());
+    }
+
+    #[test]
+    fn login_success_encodes_profile_and_session() {
+        let uuid = [0x11; 16];
+        let packet = login_success_packet("Alex", uuid).unwrap();
+        assert_eq!(packet[0], 2);
+        assert_eq!(&packet[1..17], &uuid);
+        let mut cursor = 17;
+        let name_len = read_varint(&packet, &mut cursor).unwrap() as usize;
+        assert_eq!(&packet[cursor..cursor + name_len], b"Alex");
+        cursor += name_len;
+        assert_eq!(read_varint(&packet, &mut cursor).unwrap(), 0);
+        assert_eq!(&packet[cursor..], &[0; 16]);
     }
 
     #[test]
