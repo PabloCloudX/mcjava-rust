@@ -7,7 +7,7 @@ Milestones are not complete until their acceptance criteria have been tested wit
 
 ## Current implementation gate
 
-NBT has a first bounded big-endian reader in `src/nbt.rs`; it is not yet wired into world loading or protocol registry emission. CI passed for parser-focused tests, formatting, Clippy, and x86_64 build at commit `497e266`. The next acceptance gate is registry NBT conversion and a real 26.3 client reaching Play, not a server-list ping.
+NBT has a bounded big-endian reader and writer in `src/nbt.rs`; they are not yet wired into world loading or protocol registry emission. CI passed for NBT round-trip/parser tests, formatting, Clippy, and x86_64 build at commit `67f3251`. The next acceptance gate is registry NBT conversion and a real 26.3 client reaching Play, not a server-list ping.
 3. **World and chunks**: registry synchronization, dimension and chunk data accepted by client.
 4. **Movement**: movement, collision, synchronization, persistence.
 5. **Basic gameplay**: block interaction, inventory, crafting and survival/creative mechanics.
