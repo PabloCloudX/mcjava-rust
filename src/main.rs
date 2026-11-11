@@ -13,6 +13,7 @@ const STATUS_JSON: &str = r#"{"version":{"name":"26.3","protocol":777},"players"
 
 fn main() -> io::Result<()> {
     let _nbt_parser = nbt::parse;
+    let _nbt_integer_lookup: fn(&nbt::Compound, &str) -> Option<i32> = nbt::Compound::get_int;
     let address = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:25565".into());
