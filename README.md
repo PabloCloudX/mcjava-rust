@@ -4,7 +4,7 @@ Native Rust project targeting Minecraft Java Edition 26.3 (protocol 777). The ta
 
 ## Current scope
 
-The current vertical slice is limited to Minecraft's TCP handshake and status exchange: it returns a server-list status response and echoes the ping payload. Login is explicitly not implemented. This is not a playable Minecraft server, and no world, chunk, movement, or gameplay compatibility is claimed.
+The current vertical slice implements Minecraft's TCP handshake and status exchange and parses Login Start before explicitly rejecting it with a Login Disconnect. Authentication and successful login are not implemented. This is not a playable Minecraft server, and no world, chunk, movement, or gameplay compatibility is claimed.
 
 ## Build and tests
 
@@ -13,7 +13,7 @@ Compilation, formatting, Clippy, and tests are configured to run on GitHub Actio
 The source is published at [PabloCloudX/mcjava-rust](https://github.com/PabloCloudX/mcjava-rust). Download the current x86_64 status-only build directly with:
 
 ```sh
-wget -O minecraft-rust https://github.com/PabloCloudX/mcjava-rust/releases/download/v0.1.0-status/minecraft-rust-26.3-linux-x86_64
+wget -O minecraft-rust https://github.com/PabloCloudX/mcjava-rust/releases/download/v0.2.0-login-reject/minecraft-rust-26.3-linux-x86_64
 chmod +x minecraft-rust
 ```
 

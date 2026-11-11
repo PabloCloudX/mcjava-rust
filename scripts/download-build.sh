@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 repo=PabloCloudX/mcjava-rust
-release=v0.1.0-status
+release=v0.2.0-login-reject
 asset=minecraft-rust-26.3-linux-x86_64
 out=${1:-minecraft-rust}
 arch=$(uname -m)
