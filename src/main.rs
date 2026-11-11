@@ -145,7 +145,9 @@ fn write_frame(stream: &mut TcpStream, packet: &[u8]) -> io::Result<()> {
 fn read_varint(data: &[u8], cursor: &mut usize) -> io::Result<i32> {
     let mut value = 0u32;
     for index in 0..5 {
-        let byte = *data.get(*cursor).ok_or_else(|| invalid("truncated VarInt"))?;
+        let byte = *data
+            .get(*cursor)
+            .ok_or_else(|| invalid("truncated VarInt"))?;
         *cursor += 1;
         if index == 4 && byte > 0x0f {
             return Err(invalid("VarInt exceeds 32 bits"));
