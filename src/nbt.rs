@@ -460,10 +460,7 @@ mod tests {
     fn rejects_writer_compound_entry_over_element_limit() {
         let mut values = Vec::with_capacity(MAX_ELEMENTS);
         values.resize_with(MAX_ELEMENTS, || Tag::Byte(0));
-        let root = Compound(vec![(
-            "many".into(),
-            Tag::List(1, values),
-        )]);
+        let root = Compound(vec![("many".into(), Tag::List(1, values))]);
         assert!(write(&root).is_err());
     }
 
