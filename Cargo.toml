@@ -9,3 +9,6 @@ edition = "2024"
 lto = true
 codegen-units = 1
 strip = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]

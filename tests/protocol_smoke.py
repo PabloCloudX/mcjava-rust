@@ -77,6 +77,22 @@ def login_start(name):
     return b"\x00" + varint(len(encoded)) + encoded + bytes(range(16))
 
 
+def client_information():
+    language = b"en_us"
+    return (
+        b"\x00"
+        + varint(len(language))
+        + language
+        + bytes([8])
+        + varint(0)
+        + b"\x01"
+        + bytes([0])
+        + varint(1)
+        + b"\x00\x00"
+        + varint(0)
+    )
+
+
 def decode_text_component(packet):
     offset = 1
     length = 0
@@ -146,15 +162,34 @@ def login_test(host, port):
                 raise AssertionError("Login Success UUID does not match Login Start")
             print("offline Login Success received")
             send_frame(sock, b"\x03")
-            config_disconnect = read_frame(sock)
-            if not config_disconnect or config_disconnect[0] != 2:
-                raise AssertionError(
-                    f"expected Configuration Disconnect, got {config_disconnect[:8]!r}"
-                )
-            reason = decode_nbt_text_component(config_disconnect)
-            if "Configuration" not in reason:
-                raise AssertionError(f"unexpected Configuration Disconnect reason: {reason!r}")
-            print("Login Acknowledged handled; NBT Configuration Disconnect received")
+            send_frame(sock, client_information())
+            packet = read_frame(sock)
+            if packet[0] == 2:
+                reason = decode_nbt_text_component(packet)
+                if "Configuration" not in reason:
+                    raise AssertionError(
+                        f"unexpected Configuration Disconnect reason: {reason!r}"
+                    )
+                print("Login Acknowledged handled; NBT Configuration Disconnect received")
+            else:
+                while packet[0] != 0x0F:
+                    if packet[0] == 2:
+                        raise AssertionError("Configuration replay disconnected early")
+                    packet = read_frame(sock)
+                send_frame(sock, b"\x07" + varint(0))
+                while True:
+                    packet = read_frame(sock)
+                    if packet[0] == 2:
+                        raise AssertionError("Configuration replay disconnected before finish")
+                    if packet[0] == 3:
+                        break
+                send_frame(sock, b"\x03")
+                play_login = read_frame(sock)
+                if not play_login or play_login[0] != 0x32:
+                    raise AssertionError(
+                        f"expected Play Login packet, got {play_login[:8]!r}"
+                    )
+                print("Configuration replay completed; Play Login received")
         else:
             expect_disconnect(response, 0, "Offline login is disabled")
             print("offline login disabled; expected Login Disconnect received")

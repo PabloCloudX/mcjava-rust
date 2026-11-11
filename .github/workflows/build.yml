@@ -40,3 +40,38 @@ jobs:
           ASSET_PATH: target/${{ matrix.target }}/release/minecraft-rust
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: gh release upload "$RELEASE_TAG" "$ASSET_PATH#$ASSET_NAME" --clobber
+  dll:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            artifact: minecraft-rust-26.3-dll-linux-x86_64
+            lib: target/x86_64-unknown-linux-gnu/release/libminecraft_rust.so
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: minecraft-rust-26.3-dll-windows-x86_64
+            lib: target/x86_64-pc-windows-msvc/release/minecraft_rust.dll
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release --target ${{ matrix.target }} --lib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.lib }}
+          if-no-files-found: error
+          retention-days: 14
+      - if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET_NAME: ${{ matrix.artifact }}
+          ASSET_PATH: ${{ matrix.lib }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" "$ASSET_PATH#$ASSET_NAME" --clobber
