@@ -2,7 +2,7 @@
 
 Milestones are not complete until their acceptance criteria have been tested with a matching Minecraft Java client.
 
-1. **Foundation / status**: frame codec and status ping vertical slice. Current implementation is unverified by compilation and client testing because this environment has no Rust toolchain and no GitHub remote/authentication.
+1. **Foundation / status**: frame codec and status ping vertical slice. CI test, lint, and x86_64 release build passed at `e1e2f90`; downloaded binary passed raw TCP status/ping. Matching Minecraft client test remains outstanding.
 2. **Login and connection**: protocol 777 login, authentication policy, encryption, compression, Configuration, keep-alive, disconnect.
 3. **World and chunks**: registry synchronization, dimension and chunk data accepted by client.
 4. **Movement**: movement, collision, synchronization, persistence.

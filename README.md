@@ -10,7 +10,14 @@ The current vertical slice is limited to Minecraft's TCP handshake and status ex
 
 Compilation, formatting, Clippy, and tests are configured to run on GitHub Actions, not on the VPS. Push this repository to GitHub to run those workflows and download the Linux artifact from the Actions run. Local compilation is intentionally not part of the VPS workflow.
 
-The workspace currently has no configured GitHub remote and no GitHub CLI/authentication. Configure a repository remote and push from an authorized environment before expecting Actions artifacts.
+The source is published at [PabloCloudX/mcjava-rust](https://github.com/PabloCloudX/mcjava-rust). Download the current x86_64 status-only build directly with:
+
+```sh
+wget -O minecraft-rust https://github.com/PabloCloudX/mcjava-rust/releases/download/v0.1.0-status/minecraft-rust-26.3-linux-x86_64
+chmod +x minecraft-rust
+```
+
+Or use `scripts/download-build.sh`. This release is a minimal status/ping build, not a playable server. ARM64 artifacts are not currently published.
 
 ## Runtime
 
