@@ -142,13 +142,10 @@ impl Cursor<'_> {
             8 => Ok(Tag::String(self.string()?)),
             9 => {
                 let element_kind = self.byte()?;
-                if !(1..=12).contains(&element_kind) {
+                if element_kind > 12 {
                     return Err(invalid("unknown NBT list element type"));
                 }
                 let len = self.length()?;
-                if element_kind == 0 && len != 0 {
-                    return Err(invalid("non-empty NBT list cannot contain End tags"));
-                }
                 let mut values = Vec::with_capacity(len);
                 for _ in 0..len {
                     values.push(self.payload(element_kind, depth + 1)?);
@@ -250,20 +247,20 @@ mod tests {
         for _ in 0..70 {
             input.extend([9, 0, 0, 0, 1]);
         }
-        input.extend([1, 0]);
+        input.extend([1, 0, 0, 0, 1, 42, 0, 0]);
         assert!(parse(&input).is_err());
     }
 
     #[test]
     fn decodes_java_modified_utf8_null() {
-        let input = [10, 0, 0, 8, 0, 2, 0xc0, 0x80, 0, 0];
+        let input = [10, 0, 0, 8, 0, 2, 0xc0, 0x80, 0, 0, 0];
         let root = parse(&input).unwrap();
-        assert_eq!(root.0, vec![("\\0".to_string(), Tag::String(String::new()))]);
+        assert_eq!(root.0[0].0.as_bytes(), &[0]);
     }
 
     #[test]
     fn decodes_java_modified_utf8_surrogate_pair() {
-        let input = [10, 0, 0, 8, 0, 6, 0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80, 0, 0];
+        let input = [10, 0, 0, 8, 0, 6, 0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80, 0, 0, 0];
         let root = parse(&input).unwrap();
         assert_eq!(root.0, vec![("😀".to_string(), Tag::String(String::new()))]);
     }
@@ -272,6 +269,12 @@ mod tests {
     fn rejects_unknown_empty_list_element_type() {
         let input = [10, 0, 0, 9, 0, 1, b'l', 13, 0, 0, 0, 0, 0];
         assert!(parse(&input).is_err());
+    }
+
+    #[test]
+    fn accepts_empty_list_with_end_element_type() {
+        let input = [10, 0, 0, 9, 0, 1, b'l', 0, 0, 0, 0, 0, 0];
+        assert!(parse(&input).is_ok());
     }
 
     #[test]
