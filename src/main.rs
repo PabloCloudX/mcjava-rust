@@ -20,6 +20,8 @@ fn main() -> io::Result<()> {
         .unwrap_or_else(|| "127.0.0.1:25565".into());
     let listener = TcpListener::bind(&address)?;
     eprintln!("Minecraft Rust Server status listener on {address} (protocol {PROTOCOL})");
+    eprintln!("Independent project. Not affiliated with, endorsed by, or contributed to by Mojang or Microsoft.");
+    eprintln!("Minecraft Java Edition is a Mojang/Microsoft product. This server does not yet implement login or gameplay.");
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {

@@ -1,5 +1,7 @@
 # Minecraft Rust Server
 
+Independent, unofficial project. Not affiliated with, endorsed by, or contributed to by Mojang Studios or Microsoft. Minecraft is a Mojang/Microsoft product and trademark.
+
 Native Rust project targeting Minecraft Java Edition 26.3 (protocol 777). The target version is verified against Mojang metadata; see [`docs/research/version-26.3.md`](docs/research/version-26.3.md).
 
 ## Current scope
