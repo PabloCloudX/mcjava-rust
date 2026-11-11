@@ -1,0 +1,4 @@
+/target
+*.log
+server.properties
+world/
