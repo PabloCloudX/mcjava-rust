@@ -4,3 +4,4 @@ server.properties
 world/
 /auth
 /pass
+/.local/
