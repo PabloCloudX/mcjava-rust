@@ -278,7 +278,9 @@ mod tests {
 
     #[test]
     fn decodes_java_modified_utf8_surrogate_pair() {
-        let input = [10, 0, 0, 8, 0, 6, 0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80, 0, 0, 0];
+        let input = [
+            10, 0, 0, 8, 0, 6, 0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80, 0, 0, 0,
+        ];
         let root = parse(&input).unwrap();
         assert_eq!(root.0, vec![("😀".to_string(), Tag::String(String::new()))]);
     }
@@ -300,4 +302,3 @@ mod tests {
         assert!(modified_utf8(&[0xed, 0xa0, 0x80]).is_err());
     }
 }
-
