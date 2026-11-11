@@ -2,3 +2,4 @@
 *.log
 server.properties
 world/
+/auth
