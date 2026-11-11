@@ -50,6 +50,129 @@ pub fn parse(input: &[u8]) -> io::Result<Compound> {
     Ok(root)
 }
 
+pub fn write(root: &Compound) -> io::Result<Vec<u8>> {
+    let mut out = vec![10];
+    put_string("", &mut out)?;
+    write_compound(root, 0, &mut out)?;
+    Ok(out)
+}
+
+fn write_compound(compound: &Compound, depth: usize, out: &mut Vec<u8>) -> io::Result<()> {
+    if depth >= MAX_DEPTH {
+        return Err(invalid("NBT nesting depth limit exceeded"));
+    }
+    for (name, tag) in &compound.0 {
+        let kind = tag_kind(tag);
+        out.push(kind);
+        put_string(name, out)?;
+        write_payload(tag, depth + 1, out)?;
+        if out.len() > MAX_ELEMENTS * 16 {
+            return Err(invalid("serialized NBT byte limit exceeded"));
+        }
+    }
+    out.push(0);
+    Ok(())
+}
+
+fn tag_kind(tag: &Tag) -> u8 {
+    match tag {
+        Tag::Byte(_) => 1,
+        Tag::Short(_) => 2,
+        Tag::Int(_) => 3,
+        Tag::Long(_) => 4,
+        Tag::Float(_) => 5,
+        Tag::Double(_) => 6,
+        Tag::ByteArray(_) => 7,
+        Tag::String(_) => 8,
+        Tag::List(_, _) => 9,
+        Tag::Compound(_) => 10,
+        Tag::IntArray(_) => 11,
+        Tag::LongArray(_) => 12,
+    }
+}
+
+fn write_payload(tag: &Tag, depth: usize, out: &mut Vec<u8>) -> io::Result<()> {
+    if depth >= MAX_DEPTH {
+        return Err(invalid("NBT nesting depth limit exceeded"));
+    }
+    match tag {
+        Tag::Byte(value) => out.push(*value as u8),
+        Tag::Short(value) => out.extend_from_slice(&value.to_be_bytes()),
+        Tag::Int(value) => out.extend_from_slice(&value.to_be_bytes()),
+        Tag::Long(value) => out.extend_from_slice(&value.to_be_bytes()),
+        Tag::Float(value) => out.extend_from_slice(&value.to_bits().to_be_bytes()),
+        Tag::Double(value) => out.extend_from_slice(&value.to_bits().to_be_bytes()),
+        Tag::ByteArray(values) => {
+            put_length(values.len(), out)?;
+            out.extend(values.iter().map(|value| *value as u8));
+        }
+        Tag::String(value) => put_string(value, out)?,
+        Tag::List(kind, values) => {
+            if *kind > 12 || values.len() > MAX_ELEMENTS || (*kind == 0 && !values.is_empty()) {
+                return Err(invalid("invalid NBT list kind or length"));
+            }
+            if values.iter().any(|value| tag_kind(value) != *kind) {
+                return Err(invalid("NBT list contains mixed tag types"));
+            }
+            out.push(*kind);
+            put_length(values.len(), out)?;
+            for value in values {
+                write_payload(value, depth + 1, out)?;
+            }
+        }
+        Tag::Compound(compound) => write_compound(compound, depth, out)?,
+        Tag::IntArray(values) => {
+            put_length(values.len(), out)?;
+            for value in values {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        Tag::LongArray(values) => {
+            put_length(values.len(), out)?;
+            for value in values {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn put_length(len: usize, out: &mut Vec<u8>) -> io::Result<()> {
+    if len > MAX_ELEMENTS {
+        return Err(invalid("NBT array or list length outside allowed range"));
+    }
+    out.extend_from_slice(&(len as i32).to_be_bytes());
+    Ok(())
+}
+
+fn put_string(value: &str, out: &mut Vec<u8>) -> io::Result<()> {
+    let encoded = encode_modified_utf8(value)?;
+    let len = u16::try_from(encoded.len()).map_err(|_| invalid("NBT string exceeds 65535 bytes"))?;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(&encoded);
+    Ok(())
+}
+
+fn encode_modified_utf8(value: &str) -> io::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(value.len());
+    for unit in value.encode_utf16() {
+        match unit {
+            0 => out.extend_from_slice(&[0xc0, 0x80]),
+            1..=0x7f => out.push(unit as u8),
+            0x80..=0x7ff => {
+                out.push((0xc0 | (unit >> 6)) as u8);
+                out.push((0x80 | (unit & 0x3f)) as u8);
+            }
+            _ => {
+                out.push((0xe0 | (unit >> 12)) as u8);
+                out.push((0x80 | ((unit >> 6) & 0x3f)) as u8);
+                out.push((0x80 | (unit & 0x3f)) as u8);
+            }
+        }
+    }
+    Ok(out)
+}
+
 struct Cursor<'a> {
     bytes: &'a [u8],
     pos: usize,
