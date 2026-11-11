@@ -198,8 +198,10 @@ mod tests {
 
     #[test]
     fn rejects_varint_overflow_and_truncation() {
-        assert!(read_varint(&[0xff, 0xff, 0xff, 0xff, 0x10], &mut 0).is_err());
-        assert!(read_varint(&[0x80], &mut 0).is_err());
+        let mut cursor = 0;
+        assert!(read_varint(&[0xff, 0xff, 0xff, 0xff, 0x10], &mut cursor).is_err());
+        cursor = 0;
+        assert!(read_varint(&[0x80], &mut cursor).is_err());
     }
 
     fn handshake_bytes(host: &[u8]) -> Vec<u8> {
