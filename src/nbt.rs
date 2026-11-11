@@ -248,6 +248,14 @@ mod tests {
     }
 
     #[test]
+    fn serializes_root_compound_and_round_trips() {
+        let root = Compound(vec![("x".into(), Tag::Int(42))]);
+        let encoded = write(&root).unwrap();
+        assert_eq!(encoded, [10, 0, 0, 3, 0, 1, b'x', 0, 0, 0, 42, 0]);
+        assert_eq!(parse(&encoded).unwrap(), root);
+    }
+
+    #[test]
     fn rejects_truncated_integer_payload() {
         let input = [10, 0, 0, 3, 0, 1, b'x', 0, 0];
         assert!(parse(&input).is_err());
