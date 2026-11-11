@@ -14,3 +14,7 @@ Milestones are not complete until their acceptance criteria have been tested wit
 10. **Optimization**: measurements and benchmarks before performance claims.
 
 The target remains Java 26.3. Do not silently change protocol targets.
+
+## Project status
+
+This is a long-running implementation. The requested full vanilla server is not complete; a status/ping-only vertical slice is the only planned initial target. A full Java Edition server requires sustained protocol, simulation, storage, compatibility, and security work. Do not describe the project as complete or playable until actual client tests verify each relevant milestone.

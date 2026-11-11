@@ -20,7 +20,7 @@ Run the CI-produced binary with an optional listen address, for example:
 ./minecraft-rust 127.0.0.1:25565
 ```
 
-The default is `0.0.0.0:25565`. Use loopback while testing. The listener has only minimal status support and must not be treated as a finished production server.
+The default is `127.0.0.1:25565`, so it is only reachable locally unless you explicitly choose another bind address. The listener has only minimal status support and must not be treated as a finished production server.
 
 ## Compatibility and licensing
 

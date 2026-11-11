@@ -1,23 +1,38 @@
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 const PROTOCOL: i32 = 777;
+const MAX_CONNECTIONS: usize = 128;
+static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 const MAX_PACKET: usize = 1_048_576;
 const STATUS_JSON: &str = r#"{"version":{"name":"26.3","protocol":777},"players":{"max":0,"online":0,"sample":[]},"description":{"text":"Minecraft Rust Server 26.3"}}"#;
 
 fn main() -> io::Result<()> {
-    let address = std::env::args().nth(1).unwrap_or_else(|| "0.0.0.0:25565".into());
+    let address = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "127.0.0.1:25565".into());
     let listener = TcpListener::bind(&address)?;
     eprintln!("Minecraft Rust Server status listener on {address} (protocol {PROTOCOL})");
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                std::thread::spawn(move || {
+                if ACTIVE_CONNECTIONS.fetch_add(1, Ordering::Relaxed) >= MAX_CONNECTIONS {
+                    ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
+                    drop(stream);
+                    continue;
+                }
+                let spawn = std::thread::Builder::new().spawn(move || {
+                    let _connection = ConnectionGuard;
                     if let Err(error) = serve(stream) {
                         eprintln!("connection ended: {error}");
                     }
                 });
+                if let Err(error) = spawn {
+                    ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
+                    eprintln!("could not start connection handler: {error}");
+                }
             }
             Err(error) => eprintln!("accept failed: {error}"),
         }
@@ -25,34 +40,45 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+fn parse_handshake(handshake: &[u8]) -> io::Result<(i32, i32)> {
+    let mut cursor = 0;
+    if read_varint(handshake, &mut cursor)? != 0 {
+        return Err(invalid("expected handshake packet"));
+    }
+    let protocol = read_varint(handshake, &mut cursor)?;
+    let host_len = read_varint(handshake, &mut cursor)?;
+    if !(0..=765).contains(&host_len) || cursor + host_len as usize + 3 > handshake.len() {
+        return Err(invalid("invalid handshake host length"));
+    }
+    let host = std::str::from_utf8(&handshake[cursor..cursor + host_len as usize])
+        .map_err(|_| invalid("handshake host is not valid UTF-8"))?;
+    if host.encode_utf16().count() > 255 {
+        return Err(invalid("handshake host exceeds 255 UTF-16 code units"));
+    }
+    cursor += host_len as usize + 2;
+    let next_state = read_varint(handshake, &mut cursor)?;
+    if cursor != handshake.len() {
+        return Err(invalid("trailing handshake data"));
+    }
+    Ok((protocol, next_state))
+}
+
+struct ConnectionGuard;
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 fn serve(mut stream: TcpStream) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let handshake = read_frame(&mut stream)?;
-    let mut cursor = 0;
-    if read_varint(&handshake, &mut cursor)? != 0 {
-        return Err(invalid("expected handshake packet"));
-    }
-    let protocol = read_varint(&handshake, &mut cursor)?;
-    let host_len = read_varint(&handshake, &mut cursor)?;
-    if !(0..=255).contains(&host_len) || cursor + host_len as usize + 3 > handshake.len() {
-        return Err(invalid("invalid handshake host"));
-    }
-    cursor += host_len as usize;
-    if cursor + 2 > handshake.len() {
-        return Err(invalid("missing handshake port"));
-    }
-    cursor += 2;
-    let next_state = read_varint(&handshake, &mut cursor)?;
-    if cursor != handshake.len() {
-        return Err(invalid("trailing handshake data"));
-    }
+    let (_protocol, next_state) = parse_handshake(&handshake)?;
     match next_state {
         1 => status(&mut stream),
-        2 => {
-            let _ = protocol;
-            send_disconnect(&mut stream, "Login is not implemented yet")
-        }
+        2 => send_disconnect(&mut stream, "Login is not implemented yet"),
         _ => Err(invalid("unsupported next state")),
     }
 }
@@ -82,16 +108,18 @@ fn send_disconnect(stream: &mut TcpStream, reason: &str) -> io::Result<()> {
 fn read_frame(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     let mut first = [0];
     stream.read_exact(&mut first)?;
-    let mut prefix = vec![first[0]];
     let mut length = (first[0] & 0x7f) as usize;
     let mut shift = 7;
-    while first[0] & 0x80 != 0 {
-        if prefix.len() == 3 {
+    let mut byte = first[0];
+    let mut count = 1;
+    while byte & 0x80 != 0 {
+        if count == 3 {
             return Err(invalid("frame length VarInt too long"));
         }
         stream.read_exact(&mut first)?;
-        prefix.push(first[0]);
-        length |= ((first[0] & 0x7f) as usize)
+        byte = first[0];
+        count += 1;
+        length |= ((byte & 0x7f) as usize)
             .checked_shl(shift)
             .ok_or_else(|| invalid("frame length overflow"))?;
         shift += 7;
@@ -119,6 +147,9 @@ fn read_varint(data: &[u8], cursor: &mut usize) -> io::Result<i32> {
     for index in 0..5 {
         let byte = *data.get(*cursor).ok_or_else(|| invalid("truncated VarInt"))?;
         *cursor += 1;
+        if index == 4 && byte > 0x0f {
+            return Err(invalid("VarInt exceeds 32 bits"));
+        }
         value |= ((byte & 0x7f) as u32) << (index * 7);
         if byte & 0x80 == 0 {
             return Ok(value as i32);
@@ -163,5 +194,41 @@ mod tests {
             assert_eq!(read_varint(&encoded, &mut cursor).unwrap(), value);
             assert_eq!(cursor, encoded.len());
         }
+    }
+
+    #[test]
+    fn rejects_varint_overflow_and_truncation() {
+        assert!(read_varint(&[0xff, 0xff, 0xff, 0xff, 0x10], &mut 0).is_err());
+        assert!(read_varint(&[0x80], &mut 0).is_err());
+    }
+
+    fn handshake_bytes(host: &[u8]) -> Vec<u8> {
+        let mut handshake = vec![0];
+        put_varint(PROTOCOL, &mut handshake);
+        put_varint(host.len() as i32, &mut handshake);
+        handshake.extend_from_slice(host);
+        handshake.extend_from_slice(&25565u16.to_be_bytes());
+        put_varint(1, &mut handshake);
+        handshake
+    }
+
+    #[test]
+    fn parses_valid_multibyte_handshake_host() {
+        let host = "例".repeat(255);
+        let handshake = handshake_bytes(host.as_bytes());
+        assert_eq!(parse_handshake(&handshake).unwrap(), (PROTOCOL, 1));
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_handshake_host() {
+        let handshake = handshake_bytes(&[0xff]);
+        assert!(parse_handshake(&handshake).is_err());
+    }
+
+    #[test]
+    fn rejects_handshake_host_over_255_utf16_units() {
+        let host = "😀".repeat(128);
+        let handshake = handshake_bytes(host.as_bytes());
+        assert!(parse_handshake(&handshake).is_err());
     }
 }
