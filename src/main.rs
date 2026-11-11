@@ -19,16 +19,25 @@ fn main() -> io::Result<()> {
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:25565".into());
     let offline_mode = std::env::var("MC_OFFLINE_MODE").as_deref() == Ok("1");
-    let bind_addr: SocketAddr = address
-        .parse()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "listen address must be an IP:port socket address"))?;
+    let bind_addr: SocketAddr = address.parse().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "listen address must be an IP:port socket address",
+        )
+    })?;
     if offline_mode && offline_bind_is_public(bind_addr) {
-        eprintln!("WARNING: offline mode is unauthenticated and permits identity spoofing. Publicly reachable offline servers are not recommended.");
+        eprintln!(
+            "WARNING: offline mode is unauthenticated and permits identity spoofing. Publicly reachable offline servers are not recommended."
+        );
     }
     let listener = TcpListener::bind(bind_addr)?;
     eprintln!("Minecraft Rust Server status listener on {address} (protocol {PROTOCOL})");
-    eprintln!("Independent project. Not affiliated with, endorsed by, or contributed to by Mojang or Microsoft.");
-    eprintln!("Minecraft Java Edition is a Mojang/Microsoft product. This server does not yet implement login or gameplay.");
+    eprintln!(
+        "Independent project. Not affiliated with, endorsed by, or contributed to by Mojang or Microsoft."
+    );
+    eprintln!(
+        "Minecraft Java Edition is a Mojang/Microsoft product. This server does not yet implement login or gameplay."
+    );
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -105,9 +114,14 @@ fn login(stream: &mut TcpStream) -> io::Result<()> {
     let start = read_frame(stream)?;
     let (name, uuid) = parse_login_start(&start)?;
     if std::env::var("MC_OFFLINE_MODE").as_deref() != Ok("1") {
-        return send_disconnect(stream, "Offline login is disabled; set MC_OFFLINE_MODE=1 only on a trusted private network");
+        return send_disconnect(
+            stream,
+            "Offline login is disabled; set MC_OFFLINE_MODE=1 only on a trusted private network",
+        );
     }
-    eprintln!("WARNING: offline mode does not authenticate players; usernames and UUIDs can be spoofed.");
+    eprintln!(
+        "WARNING: offline mode does not authenticate players; usernames and UUIDs can be spoofed."
+    );
     send_login_success(stream, name, uuid)?;
     let acknowledgement = read_frame(stream)?;
     if acknowledgement != [3] {
