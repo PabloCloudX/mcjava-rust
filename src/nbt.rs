@@ -193,4 +193,30 @@ mod tests {
         let input = [10, 0, 0, 0, 0];
         assert!(parse(&input).is_err());
     }
+
+    #[test]
+    fn rejects_excessively_nested_lists() {
+        let mut input = vec![10, 0, 0, 9, 0, 1, b'l'];
+        for _ in 0..70 {
+            input.extend([9, 0, 0, 0, 1]);
+        }
+        input.push(1);
+        input.push(0);
+        input.extend([0; 3]);
+        input.push(0);
+        assert!(parse(&input).is_err());
+    }
+
+    #[test]
+    fn decodes_java_modified_utf8_null() {
+        let input = [10, 0, 0, 8, 0, 2, 0xc0, 0x80, 0, 0];
+        let root = parse(&input).unwrap();
+        assert_eq!(root.0, vec![("\\0".to_string(), Tag::String(String::new()))]);
+    }
+
+    #[test]
+    fn rejects_unknown_empty_list_element_type() {
+        let input = [10, 0, 0, 9, 0, 1, b'l', 13, 0, 0, 0, 0, 0];
+        assert!(parse(&input).is_err());
+    }
 }
