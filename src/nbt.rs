@@ -52,8 +52,14 @@ struct Cursor<'a> {
 
 impl Cursor<'_> {
     fn take(&mut self, count: usize) -> io::Result<&[u8]> {
-        let end = self.pos.checked_add(count).ok_or_else(|| invalid("NBT length overflow"))?;
-        let bytes = self.bytes.get(self.pos..end).ok_or_else(|| invalid("truncated NBT"))?;
+        let end = self
+            .pos
+            .checked_add(count)
+            .ok_or_else(|| invalid("NBT length overflow"))?;
+        let bytes = self
+            .bytes
+            .get(self.pos..end)
+            .ok_or_else(|| invalid("truncated NBT"))?;
         self.pos = end;
         Ok(bytes)
     }
@@ -79,7 +85,10 @@ impl Cursor<'_> {
         if !(0..=MAX_ELEMENTS as i32).contains(&len) {
             return Err(invalid("NBT array or list length outside allowed range"));
         }
-        self.elements = self.elements.checked_add(len as usize).ok_or_else(|| invalid("NBT element count overflow"))?;
+        self.elements = self
+            .elements
+            .checked_add(len as usize)
+            .ok_or_else(|| invalid("NBT element count overflow"))?;
         if self.elements > MAX_ELEMENTS {
             return Err(invalid("NBT total element limit exceeded"));
         }
@@ -99,8 +108,13 @@ impl Cursor<'_> {
         let mut tags = Vec::new();
         loop {
             let kind = self.byte()?;
-            if kind == 0 { break; }
-            self.elements = self.elements.checked_add(1).ok_or_else(|| invalid("NBT element count overflow"))?;
+            if kind == 0 {
+                break;
+            }
+            self.elements = self
+                .elements
+                .checked_add(1)
+                .ok_or_else(|| invalid("NBT element count overflow"))?;
             if self.elements > MAX_ELEMENTS {
                 return Err(invalid("NBT total element limit exceeded"));
             }
@@ -130,7 +144,9 @@ impl Cursor<'_> {
                     return Err(invalid("non-empty NBT list cannot contain End tags"));
                 }
                 let mut values = Vec::with_capacity(len);
-                for _ in 0..len { values.push(self.payload(element_kind, depth + 1)?); }
+                for _ in 0..len {
+                    values.push(self.payload(element_kind, depth + 1)?);
+                }
                 Ok(Tag::List(element_kind, values))
             }
             10 => Ok(Tag::Compound(self.compound(depth)?)),
