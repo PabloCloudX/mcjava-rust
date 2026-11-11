@@ -6,7 +6,7 @@ Native Rust project targeting Minecraft Java Edition 26.3 (protocol 777). The ta
 
 ## Current scope
 
-The current vertical slice implements Minecraft's TCP handshake and status exchange. With `MC_OFFLINE_MODE=1` on a trusted private network, it sends offline Login Success and then explicitly disconnects during Configuration because configuration and gameplay are not implemented. Offline mode does not authenticate players and allows identity spoofing. It is disabled by default. If enabled on a public bind address, the server prints a warning but continues; use only if you accept spoofing risk. No online authentication, playable world, chunk, movement, or gameplay compatibility is claimed.
+The current vertical slice implements Minecraft's TCP handshake and status exchange. With `MC_OFFLINE_MODE=1` on a trusted private network, it sends offline Login Success and then explicitly disconnects during Configuration because configuration and gameplay are not implemented. Offline mode does not authenticate players and allows identity spoofing. It is disabled by default. A public bind is refused unless `MC_ALLOW_PUBLIC_OFFLINE=1` is also set; even then the server prints a warning. Use that override only if you accept spoofing risk. Login also rejects protocol versions other than 777 and usernames outside the ASCII `[A-Za-z0-9_]` set. No online authentication, playable world, chunk, movement, or gameplay compatibility is claimed.
 
 ## Build and tests
 
@@ -29,7 +29,13 @@ Run the CI-produced binary with an optional listen address, for example:
 ./minecraft-rust 127.0.0.1:25565
 ```
 
-The default is `127.0.0.1:25565`, so it is only reachable locally unless you explicitly choose another bind address. The listener has only minimal status support and must not be treated as a finished production server.
+The default is `127.0.0.1:25565`, so it is only reachable locally unless you explicitly choose another bind address. Offline login is opt-in:
+
+```text
+MC_OFFLINE_MODE=1 ./minecraft-rust 127.0.0.1:25565
+```
+
+An offline bind to a non-loopback address is refused unless you also set `MC_ALLOW_PUBLIC_OFFLINE=1`. The listener has only minimal status support and must not be treated as a finished production server.
 
 ## Compatibility and licensing
 

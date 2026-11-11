@@ -10,6 +10,8 @@ const MAX_CONNECTIONS: usize = 128;
 static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 const MAX_PACKET: usize = 1_048_576;
 const STATUS_JSON: &str = r#"{"version":{"name":"26.3","protocol":777},"players":{"max":0,"online":0,"sample":[]},"description":{"text":"Minecraft Rust Server 26.3"}}"#;
+const OFFLINE_MODE_ENV: &str = "MC_OFFLINE_MODE";
+const ALLOW_PUBLIC_OFFLINE_ENV: &str = "MC_ALLOW_PUBLIC_OFFLINE";
 
 fn main() -> io::Result<()> {
     let _nbt_parser = nbt::parse;
@@ -18,13 +20,22 @@ fn main() -> io::Result<()> {
     let address = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:25565".into());
-    let offline_mode = std::env::var("MC_OFFLINE_MODE").as_deref() == Ok("1");
+    let offline_mode = std::env::var(OFFLINE_MODE_ENV).as_deref() == Ok("1");
+    let allow_public_offline = std::env::var(ALLOW_PUBLIC_OFFLINE_ENV).as_deref() == Ok("1");
     let bind_addr: SocketAddr = address.parse().map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "listen address must be an IP:port socket address",
         )
     })?;
+    if public_offline_bind_is_refused(bind_addr, offline_mode, allow_public_offline) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to bind offline mode to public address {bind_addr}; set {ALLOW_PUBLIC_OFFLINE_ENV}=1 only on a trusted private network"
+            ),
+        ));
+    }
     if offline_mode && offline_bind_is_public(bind_addr) {
         eprintln!(
             "WARNING: offline mode is unauthenticated and permits identity spoofing. Publicly reachable offline servers are not recommended."
@@ -36,7 +47,7 @@ fn main() -> io::Result<()> {
         "Independent project. Not affiliated with, endorsed by, or contributed to by Mojang or Microsoft."
     );
     eprintln!(
-        "Minecraft Java Edition is a Mojang/Microsoft product. This server does not yet implement login or gameplay."
+        "Minecraft Java Edition is a Mojang/Microsoft product. This server does not yet implement Configuration, Play, or gameplay."
     );
     for stream in listener.incoming() {
         match stream {
@@ -98,10 +109,10 @@ fn serve(mut stream: TcpStream) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let handshake = read_frame(&mut stream)?;
-    let (_protocol, next_state) = parse_handshake(&handshake)?;
+    let (protocol, next_state) = parse_handshake(&handshake)?;
     match next_state {
         1 => status(&mut stream),
-        2 => login(&mut stream),
+        2 => login(&mut stream, protocol),
         _ => Err(invalid("unsupported next state")),
     }
 }
@@ -110,10 +121,31 @@ fn offline_bind_is_public(address: SocketAddr) -> bool {
     !address.ip().is_loopback()
 }
 
-fn login(stream: &mut TcpStream) -> io::Result<()> {
+fn public_offline_bind_is_refused(
+    address: SocketAddr,
+    offline_mode: bool,
+    allow_public_offline: bool,
+) -> bool {
+    offline_mode && offline_bind_is_public(address) && !allow_public_offline
+}
+
+fn protocol_is_supported(protocol: i32) -> bool {
+    protocol == PROTOCOL
+}
+
+fn login(stream: &mut TcpStream, protocol: i32) -> io::Result<()> {
+    if !protocol_is_supported(protocol) {
+        return send_disconnect(
+            stream,
+            "Unsupported protocol version; this server targets Minecraft Java Edition 26.3 (protocol 777)",
+        );
+    }
     let start = read_frame(stream)?;
-    let (name, uuid) = parse_login_start(&start)?;
-    if std::env::var("MC_OFFLINE_MODE").as_deref() != Ok("1") {
+    let (name, uuid) = match parse_login_start(&start) {
+        Ok(parsed) => parsed,
+        Err(_) => return send_disconnect(stream, "Invalid Login Start packet"),
+    };
+    if std::env::var(OFFLINE_MODE_ENV).as_deref() != Ok("1") {
         return send_disconnect(
             stream,
             "Offline login is disabled; set MC_OFFLINE_MODE=1 only on a trusted private network",
@@ -145,7 +177,7 @@ fn login_success_packet(name: &str, uuid: [u8; 16]) -> io::Result<Vec<u8>> {
 
 fn send_configuration_disconnect(stream: &mut TcpStream, reason: &str) -> io::Result<()> {
     let mut data = vec![2];
-    put_string(&format!("{{\"text\":\"{reason}\"}}"), &mut data)?;
+    put_string(&text_component(reason), &mut data)?;
     write_frame(stream, &data)
 }
 
@@ -160,14 +192,23 @@ fn parse_login_start(packet: &[u8]) -> io::Result<(&str, [u8; 16])> {
     }
     let name = std::str::from_utf8(&packet[cursor..cursor + name_len as usize])
         .map_err(|_| invalid("login name is not valid UTF-8"))?;
-    if name.chars().any(|character| character.is_control()) {
-        return Err(invalid("login name contains control characters"));
+    if !is_valid_username(name) {
+        return Err(invalid(
+            "login name must be 1-16 ASCII letters, digits, or underscores",
+        ));
     }
     cursor += name_len as usize;
     let uuid: [u8; 16] = packet[cursor..]
         .try_into()
         .map_err(|_| invalid("login start UUID must be 16 bytes"))?;
     Ok((name, uuid))
+}
+
+fn is_valid_username(name: &str) -> bool {
+    (1..=16).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn status(stream: &mut TcpStream) -> io::Result<()> {
@@ -188,8 +229,32 @@ fn status(stream: &mut TcpStream) -> io::Result<()> {
 
 fn send_disconnect(stream: &mut TcpStream, reason: &str) -> io::Result<()> {
     let mut data = vec![0];
-    put_string(&format!("{{\"text\":\"{reason}\"}}"), &mut data)?;
+    put_string(&text_component(reason), &mut data)?;
     write_frame(stream, &data)
+}
+
+fn text_component(text: &str) -> String {
+    format!("{{\"text\":\"{}\"}}", json_escape(text))
+}
+
+fn json_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{08}' => escaped.push_str("\\b"),
+            '\u{0c}' => escaped.push_str("\\f"),
+            character if character < '\u{20}' => {
+                escaped.push_str(&format!("\\u{:04x}", character as u32));
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn read_frame(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
@@ -362,5 +427,50 @@ mod tests {
         let mut packet = vec![0, 1, 0xff];
         packet.extend([0; 16]);
         assert!(parse_login_start(&packet).is_err());
+    }
+
+    #[test]
+    fn rejects_login_names_outside_ascii_username_charset() {
+        for name in ["Bad Name", "bad-name", "bad.name", "nama_é", "bad!"] {
+            let mut packet = vec![0];
+            put_varint(name.len() as i32, &mut packet);
+            packet.extend_from_slice(name.as_bytes());
+            packet.extend([0; 16]);
+            assert!(
+                parse_login_start(&packet).is_err(),
+                "{name} should be rejected"
+            );
+        }
+        let mut packet = vec![0];
+        put_varint(1, &mut packet);
+        packet.extend_from_slice(b"_");
+        packet.extend([0; 16]);
+        assert!(parse_login_start(&packet).is_ok());
+    }
+
+    #[test]
+    fn protocol_check_accepts_only_777() {
+        assert!(protocol_is_supported(777));
+        assert!(!protocol_is_supported(776));
+        assert!(!protocol_is_supported(778));
+    }
+
+    #[test]
+    fn public_offline_bind_is_refused_without_override() {
+        let public: SocketAddr = "0.0.0.0:25565".parse().unwrap();
+        let loopback: SocketAddr = "127.0.0.1:25565".parse().unwrap();
+        assert!(public_offline_bind_is_refused(public, true, false));
+        assert!(!public_offline_bind_is_refused(public, true, true));
+        assert!(!public_offline_bind_is_refused(public, false, false));
+        assert!(!public_offline_bind_is_refused(loopback, true, false));
+    }
+
+    #[test]
+    fn text_component_escapes_json_metacharacters() {
+        assert_eq!(
+            text_component("quote \" slash \\ newline\n tab\t nul\u{0}"),
+            "{\"text\":\"quote \\\" slash \\\\ newline\\n tab\\t nul\\u0000\"}"
+        );
+        assert_eq!(text_component("é"), "{\"text\":\"é\"}");
     }
 }

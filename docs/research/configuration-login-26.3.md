@@ -16,7 +16,7 @@ Packet IDs are state- and direction-specific.
 - Serverbound Login Acknowledged is packet `0x03`, no fields; transitions into Configuration.
 - Online mode requires the encryption request/response exchange and Mojang session authentication. Do not send unauthenticated Login Success while claiming online mode.
 
-The code currently validates Login Start and safely answers with Login Disconnect. It does not implement authentication or successful login.
+The code validates Login Start and protocol 777, answers Login Disconnect by default, and sends offline Login Success only when `MC_OFFLINE_MODE=1` is explicitly enabled. It does not implement online authentication.
 
 ## Configuration
 

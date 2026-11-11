@@ -6,7 +6,9 @@ import struct
 import subprocess
 import sys
 import time
-import time
+
+PROTOCOL = 777
+MAX_PACKET = 1_048_576
 
 
 def varint(value):
@@ -40,7 +42,7 @@ def read_varint(sock):
 
 def read_frame(sock):
     size = read_varint(sock)
-    if not 0 < size <= 1_048_576:
+    if not 0 < size <= MAX_PACKET:
         raise ValueError(f"invalid packet size {size}")
     result = bytearray()
     while len(result) < size:
@@ -51,43 +53,83 @@ def read_frame(sock):
     return bytes(result)
 
 
-def handshake(host, port, state):
+def handshake(host, port, state, protocol=PROTOCOL):
     encoded_host = host.encode()
-    return b"\x00" + varint(777) + varint(len(encoded_host)) + encoded_host + struct.pack(">H", port) + varint(state)
+    return (
+        b"\x00"
+        + varint(protocol)
+        + varint(len(encoded_host))
+        + encoded_host
+        + struct.pack(">H", port)
+        + varint(state)
+    )
 
 
-def request(host, port, state, packet):
-    with socket.create_connection((host, port), timeout=3) as sock:
-        sock.settimeout(3)
-        send_frame(sock, handshake(host, port, state))
-        send_frame(sock, packet)
-        return read_frame(sock)
+def open_handshake(host, port, state, protocol=PROTOCOL):
+    sock = socket.create_connection((host, port), timeout=3)
+    sock.settimeout(3)
+    send_frame(sock, handshake(host, port, state, protocol))
+    return sock
+
+
+def login_start(name):
+    encoded = name.encode()
+    return b"\x00" + varint(len(encoded)) + encoded + bytes(range(16))
+
+
+def decode_text_component(packet):
+    offset = 1
+    length = 0
+    shift = 0
+    while True:
+        byte = packet[offset]
+        offset += 1
+        length |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            break
+        shift += 7
+    return json.loads(packet[offset : offset + length].decode())
+
+
+def expect_disconnect(packet, packet_id, needle=None):
+    if not packet or packet[0] != packet_id:
+        raise AssertionError(f"expected disconnect packet id {packet_id}, got {packet[:8]!r}")
+    if needle is not None:
+        text = decode_text_component(packet).get("text", "")
+        if needle not in text:
+            raise AssertionError(f"disconnect reason {text!r} does not contain {needle!r}")
 
 
 def status_test(host, port):
-    response = request(host, port, 1, b"\x00")
-    if response[0] != 0:
-        raise AssertionError(f"unexpected status response packet id {response[0]}")
-    length, shift, offset = 0, 0, 1
-    while True:
-        byte = response[offset]
-        offset += 1
-        length |= (byte & 0x7F) << shift
-        shift += 7
-        if not byte & 0x80:
-            break
-    status = json.loads(response[offset:offset + length])
-    if status["version"] != {"name": "26.3", "protocol": 777}:
-        raise AssertionError(f"unexpected server version: {status['version']}")
-    print("status response: 26.3 / protocol 777")
+    with open_handshake(host, port, 1) as sock:
+        send_frame(sock, b"\x00")
+        response = read_frame(sock)
+        if response[0] != 0:
+            raise AssertionError(f"unexpected status response packet id {response[0]}")
+        length, shift, offset = 0, 0, 1
+        while True:
+            byte = response[offset]
+            offset += 1
+            length |= (byte & 0x7F) << shift
+            shift += 7
+            if not byte & 0x80:
+                break
+        status = json.loads(response[offset : offset + length])
+        if status["version"] != {"name": "26.3", "protocol": PROTOCOL}:
+            raise AssertionError(f"unexpected server version: {status['version']}")
+        print("status response: 26.3 / protocol 777")
+
+        ping = b"\x01" + bytes(range(8))
+        send_frame(sock, ping)
+        echo = read_frame(sock)
+        if echo != ping:
+            raise AssertionError(f"ping echo mismatch: {echo!r} != {ping!r}")
+        print("ping/pong echo: 8 bytes")
 
 
 def login_test(host, port):
-    login_start = b"\x00" + varint(4) + b"Test" + bytes(range(16))
-    with socket.create_connection((host, port), timeout=3) as sock:
-        sock.settimeout(3)
-        send_frame(sock, handshake(host, port, 2))
-        send_frame(sock, login_start)
+    with open_handshake(host, port, 2) as sock:
+        send_frame(sock, login_start("Test"))
         response = read_frame(sock)
         if os.environ.get("MC_OFFLINE_MODE") == "1":
             if not response or response[0] != 2:
@@ -98,12 +140,72 @@ def login_test(host, port):
             send_frame(sock, b"\x03")
             config_disconnect = read_frame(sock)
             if not config_disconnect or config_disconnect[0] != 2:
-                raise AssertionError(f"expected Configuration Disconnect, got {config_disconnect[:8]!r}")
+                raise AssertionError(
+                    f"expected Configuration Disconnect, got {config_disconnect[:8]!r}"
+                )
             print("Login Acknowledged handled; expected Configuration Disconnect received")
         else:
-            if not response or response[0] != 0:
-                raise AssertionError(f"expected Login Disconnect, got {response[:8]!r}")
+            expect_disconnect(response, 0, "Offline login is disabled")
             print("offline login disabled; expected Login Disconnect received")
+
+
+def wrong_protocol_test(host, port):
+    with open_handshake(host, port, 2, protocol=PROTOCOL - 1) as sock:
+        send_frame(sock, login_start("Test"))
+        expect_disconnect(read_frame(sock), 0, "protocol")
+        print("wrong protocol rejected with Login Disconnect")
+
+
+def invalid_username_test(host, port):
+    with open_handshake(host, port, 2) as sock:
+        send_frame(sock, login_start("Bad Name"))
+        expect_disconnect(read_frame(sock), 0, "Invalid Login Start")
+        print("invalid username rejected with Login Disconnect")
+
+
+def public_bind_refusal_test(binary, env):
+    refusal_env = env.copy()
+    refusal_env.pop("MC_ALLOW_PUBLIC_OFFLINE", None)
+    process = subprocess.Popen(
+        [binary, "0.0.0.0:0"],
+        env=refusal_env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        _, stderr = process.communicate(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        _, stderr = process.communicate()
+        raise AssertionError("public offline bind was not refused")
+    if process.returncode == 0:
+        raise AssertionError("public offline bind unexpectedly succeeded")
+    if b"refusing to bind offline mode" not in stderr:
+        raise AssertionError("public offline bind refusal reason was not written")
+    print("public offline bind refused without override")
+
+
+def public_bind_override_test(binary, env):
+    override_env = env.copy()
+    override_env["MC_ALLOW_PUBLIC_OFFLINE"] = "1"
+    process = subprocess.Popen(
+        [binary, "0.0.0.0:0"],
+        env=override_env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    time.sleep(0.1)
+    if process.poll() is not None:
+        raise AssertionError("public offline bind with override unexpectedly exited")
+    process.terminate()
+    try:
+        stderr = process.communicate(timeout=2)[1]
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stderr = process.communicate()[1]
+    if b"WARNING: offline mode is unauthenticated" not in stderr:
+        raise AssertionError("offline public-bind warning was not written to console")
+    print("public offline bind allowed with explicit override")
 
 
 def main():
@@ -123,7 +225,9 @@ def main():
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if process.poll() is not None:
-                raise RuntimeError(f"server exited at startup: {process.stderr.read().decode(errors='replace')}")
+                raise RuntimeError(
+                    f"server exited at startup: {process.stderr.read().decode(errors='replace')}"
+                )
             try:
                 with socket.create_connection(("127.0.0.1", port), timeout=0.1):
                     break
@@ -133,24 +237,11 @@ def main():
             raise TimeoutError("server did not open its listener")
         status_test("127.0.0.1", port)
         login_test("127.0.0.1", port)
+        wrong_protocol_test("127.0.0.1", port)
+        invalid_username_test("127.0.0.1", port)
         if offline_mode:
-            public_bind = subprocess.Popen(
-                [binary, "0.0.0.0:0"],
-                env=server_env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            time.sleep(0.1)
-            if public_bind.poll() is not None:
-                raise AssertionError("offline mode public bind unexpectedly exited")
-            public_bind.terminate()
-            try:
-                public_log = public_bind.communicate(timeout=2)[1]
-            except subprocess.TimeoutExpired:
-                public_bind.kill()
-                public_log = public_bind.communicate()[1]
-            if b"WARNING: offline mode is unauthenticated" not in public_log:
-                raise AssertionError("offline public-bind warning was not written to console")
+            public_bind_refusal_test(binary, server_env)
+            public_bind_override_test(binary, server_env)
     finally:
         process.terminate()
         try:
