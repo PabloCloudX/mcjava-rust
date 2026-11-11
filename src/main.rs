@@ -12,6 +12,7 @@ const MAX_PACKET: usize = 1_048_576;
 const STATUS_JSON: &str = r#"{"version":{"name":"26.3","protocol":777},"players":{"max":0,"online":0,"sample":[]},"description":{"text":"Minecraft Rust Server 26.3"}}"#;
 
 fn main() -> io::Result<()> {
+    let _nbt_parser = nbt::parse;
     let address = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:25565".into());
