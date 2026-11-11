@@ -12,7 +12,7 @@ Target: Java Edition 26.3, protocol 777. See [`research/protocol-26.3.md`](resea
 
 ## Login request handling
 
-The server parses Login Start (`0x00` serverbound in Login state), validating username byte length, UTF-8, and the 16-byte UUID. If `MC_OFFLINE_MODE=1` is explicitly set while bound to a non-public address, it sends Login Success (`0x02`) with the submitted name/UUID and an empty properties list, accepts Login Acknowledged (`0x03`), then sends Configuration Disconnect (`0x02`) because registries and gameplay are not implemented. Offline login is unauthenticated and spoofable. By default, it is disabled and Login Disconnect (`0x00`) is returned. Opt-in offline mode is restricted to loopback bind addresses for both IPv4 and IPv6.
+The server parses Login Start (`0x00` serverbound in Login state), validating username byte length, UTF-8, and the 16-byte UUID. If `MC_OFFLINE_MODE=1` is explicitly set while bound to a non-public address, it sends Login Success (`0x02`) with the submitted name/UUID and an empty properties list, accepts Login Acknowledged (`0x03`), then sends Configuration Disconnect (`0x02`) because registries and gameplay are not implemented. Offline login is unauthenticated and spoofable. By default, it is disabled and Login Disconnect (`0x00`) is returned. With offline mode enabled on any bind address, including public IPv4/IPv6, the server warns in the console and continues.
 
 ## Not implemented
 

@@ -6,7 +6,7 @@ Native Rust project targeting Minecraft Java Edition 26.3 (protocol 777). The ta
 
 ## Current scope
 
-The current vertical slice implements Minecraft's TCP handshake and status exchange. With `MC_OFFLINE_MODE=1` on a trusted private network, it sends offline Login Success and then explicitly disconnects during Configuration because configuration and gameplay are not implemented. Offline mode does not authenticate players and allows identity spoofing. It is disabled by default, and the server refuses to start it on any non-loopback IPv4 or IPv6 address. No online authentication, playable world, chunk, movement, or gameplay compatibility is claimed.
+The current vertical slice implements Minecraft's TCP handshake and status exchange. With `MC_OFFLINE_MODE=1` on a trusted private network, it sends offline Login Success and then explicitly disconnects during Configuration because configuration and gameplay are not implemented. Offline mode does not authenticate players and allows identity spoofing. It is disabled by default. If enabled on a public bind address, the server prints a warning but continues; use only if you accept spoofing risk. No online authentication, playable world, chunk, movement, or gameplay compatibility is claimed.
 
 ## Build and tests
 

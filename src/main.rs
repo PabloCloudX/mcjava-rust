@@ -22,11 +22,8 @@ fn main() -> io::Result<()> {
     let bind_addr: SocketAddr = address
         .parse()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "listen address must be an IP:port socket address"))?;
-    if offline_mode && !bind_addr.ip().is_loopback() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "refusing unauthenticated offline login on a non-loopback bind address",
-        ));
+    if offline_mode && offline_bind_is_public(bind_addr) {
+        eprintln!("WARNING: offline mode is unauthenticated and permits identity spoofing. Publicly reachable offline servers are not recommended.");
     }
     let listener = TcpListener::bind(bind_addr)?;
     eprintln!("Minecraft Rust Server status listener on {address} (protocol {PROTOCOL})");
@@ -98,6 +95,10 @@ fn serve(mut stream: TcpStream) -> io::Result<()> {
         2 => login(&mut stream),
         _ => Err(invalid("unsupported next state")),
     }
+}
+
+fn offline_bind_is_public(address: SocketAddr) -> bool {
+    !address.ip().is_loopback()
 }
 
 fn login(stream: &mut TcpStream) -> io::Result<()> {
@@ -309,11 +310,11 @@ mod tests {
     }
 
     #[test]
-    fn refuses_offline_login_on_non_loopback_addresses() {
-        assert!(!"0.0.0.0:25565".parse::<SocketAddr>().unwrap().ip().is_loopback());
-        assert!(!"[::]:25565".parse::<SocketAddr>().unwrap().ip().is_loopback());
-        assert!("127.0.0.1:25565".parse::<SocketAddr>().unwrap().ip().is_loopback());
-        assert!("[::1]:25565".parse::<SocketAddr>().unwrap().ip().is_loopback());
+    fn detects_public_offline_bind_addresses() {
+        assert!(offline_bind_is_public("0.0.0.0:25565".parse().unwrap()));
+        assert!(offline_bind_is_public("[::]:25565".parse().unwrap()));
+        assert!(!offline_bind_is_public("127.0.0.1:25565".parse().unwrap()));
+        assert!(!offline_bind_is_public("[::1]:25565".parse().unwrap()));
     }
 
     #[test]
