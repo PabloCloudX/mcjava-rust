@@ -13,6 +13,7 @@ const MAX_CONNECTIONS: usize = 128;
 static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 static ONLINE_PLAYERS: AtomicUsize = AtomicUsize::new(0);
 static NEXT_ENTITY_ID: AtomicI32 = AtomicI32::new(1);
+static NEXT_TELEPORT_ID: AtomicI32 = AtomicI32::new(1);
 static CAPTURE: OnceLock<Option<Capture>> = OnceLock::new();
 static REGISTRY: OnceLock<Option<Registry>> = OnceLock::new();
 const MAX_PACKET: usize = 1_048_576;
@@ -28,7 +29,13 @@ const REMOVE_ENTITIES_PACKET_ID: i32 = 0x4E;
 const SET_CHUNK_CACHE_CENTER_PACKET_ID: i32 = 0x60;
 const LEVEL_CHUNK_WITH_LIGHT_PACKET_ID: i32 = 0x2E;
 const PLAYER_ENTITY_TYPE_ID: i32 = 159;
-const VIEW_DISTANCE: i32 = 2;
+const CHAT_COMMAND_PACKET_ID: i32 = 0x07;
+const CHAT_PACKET_ID: i32 = 0x09;
+const GAME_EVENT_PACKET_ID: i32 = 0x27;
+const PLAYER_ABILITY_PACKET_ID: i32 = 0x41;
+const PLAYER_POSITION_PACKET_ID: i32 = 0x49;
+const SYSTEM_CHAT_PACKET_ID: i32 = 0x7C;
+const VIEW_DISTANCE: i32 = 10;
 const OFFLINE_MODE_ENV: &str = "MC_OFFLINE_MODE";
 const ALLOW_PUBLIC_OFFLINE_ENV: &str = "MC_ALLOW_PUBLIC_OFFLINE";
 const CAPTURE_DIR_ENV: &str = "MC_CAPTURE_DIR";
@@ -220,7 +227,13 @@ struct Capture {
 impl Capture {
     fn load() -> io::Result<Self> {
         let directory = capture_dir();
-        let play = read_capture_stream(&directory.join("play_packets.bin"))?;
+        let mut play = read_capture_stream(&directory.join("play_packets.bin"))?;
+        let captured_entity_id = play
+            .iter()
+            .find(|packet| packet.first() == Some(&0x32) && packet.len() >= 5)
+            .map(|packet| i32::from_be_bytes(packet[1..5].try_into().unwrap()))
+            .unwrap_or(1);
+        play.retain(|packet| keep_play_packet(packet, captured_entity_id));
         let chunks = play
             .iter()
             .filter_map(|packet| chunk_coords(packet).map(|(x, z)| (x, z, packet.clone())))
@@ -231,6 +244,26 @@ impl Capture {
             play,
             chunks,
         })
+    }
+}
+
+fn keep_play_packet(packet: &[u8], captured_entity_id: i32) -> bool {
+    let mut cursor = 0;
+    let Ok(packet_id) = read_varint(packet, &mut cursor) else {
+        return false;
+    };
+    match packet_id {
+        0x0a | 0x0b | 0x0c | 0x10 | 0x12 | 0x27 | 0x2c | 0x2d | 0x2e | 0x32 | 0x41 | 0x49
+        | 0x4b | 0x4d | 0x53 | 0x58 | 0x60 | 0x61 | 0x63 | 0x69 | 0x6a | 0x6b | 0x73 | 0x82
+        | 0x83 | 0x85 | 0x88 => true,
+        0x22 => packet
+            .get(cursor..cursor + 4)
+            .and_then(|bytes| bytes.try_into().ok())
+            .is_some_and(|bytes| i32::from_be_bytes(bytes) == captured_entity_id),
+        0x65 | 0x86 => {
+            read_varint(packet, &mut cursor).is_ok_and(|entity_id| entity_id == captured_entity_id)
+        }
+        _ => false,
     }
 }
 
@@ -366,6 +399,7 @@ struct Player {
 }
 
 static PLAYERS: OnceLock<Mutex<HashMap<i32, Arc<Mutex<Player>>>>> = OnceLock::new();
+static OPS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 fn players() -> &'static Mutex<HashMap<i32, Arc<Mutex<Player>>>> {
     PLAYERS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -392,6 +426,266 @@ fn send_to_all(packets: &[Vec<u8>]) {
             let _ = send_shared(&writer, packet);
         }
     }
+}
+
+fn ops() -> &'static Mutex<HashSet<String>> {
+    OPS.get_or_init(|| {
+        let mut names = HashSet::new();
+        if let Ok(value) = std::env::var("MC_OPS") {
+            for name in value.split(',') {
+                let name = name.trim();
+                if !name.is_empty() {
+                    names.insert(name.to_ascii_lowercase());
+                }
+            }
+        }
+        Mutex::new(names)
+    })
+}
+
+fn is_op(name: &str) -> bool {
+    ops()
+        .lock()
+        .map(|names| names.contains(&name.to_ascii_lowercase()))
+        .unwrap_or(false)
+}
+
+fn set_op(name: &str, enabled: bool) {
+    if let Ok(mut names) = ops().lock() {
+        if enabled {
+            names.insert(name.to_ascii_lowercase());
+        } else {
+            names.remove(&name.to_ascii_lowercase());
+        }
+    }
+}
+
+fn system_chat_packet(message: &str) -> io::Result<Vec<u8>> {
+    let mut data = vec![SYSTEM_CHAT_PACKET_ID as u8];
+    let component = nbt::Compound(vec![(
+        "text".to_owned(),
+        nbt::Tag::String(message.to_owned()),
+    )]);
+    data.extend_from_slice(&nbt::write_network_tag(&nbt::Tag::Compound(component))?);
+    data.push(0);
+    Ok(data)
+}
+
+fn send_system_chat(writer: &Arc<Mutex<TcpStream>>, message: &str) -> io::Result<()> {
+    send_shared(writer, &system_chat_packet(message)?)
+}
+
+fn send_system_chat_all(message: &str) {
+    if let Ok(packet) = system_chat_packet(message) {
+        send_to_all(&[packet]);
+    }
+}
+
+fn game_event_packet(event: u8, value: f32) -> Vec<u8> {
+    let mut data = vec![GAME_EVENT_PACKET_ID as u8, event];
+    data.extend_from_slice(&value.to_be_bytes());
+    data
+}
+
+fn abilities_packet(game_mode: i32) -> Vec<u8> {
+    let flags = match game_mode {
+        1 => 0x0d,
+        3 => 0x07,
+        _ => 0x00,
+    };
+    let mut data = vec![PLAYER_ABILITY_PACKET_ID as u8, flags];
+    data.extend_from_slice(&0.05f32.to_be_bytes());
+    data.extend_from_slice(&0.1f32.to_be_bytes());
+    data
+}
+
+fn player_position_packet(
+    teleport_id: i32,
+    x: f64,
+    y: f64,
+    z: f64,
+    yaw: f32,
+    pitch: f32,
+) -> Vec<u8> {
+    let mut data = vec![PLAYER_POSITION_PACKET_ID as u8];
+    put_varint(teleport_id, &mut data);
+    data.extend_from_slice(&x.to_be_bytes());
+    data.extend_from_slice(&y.to_be_bytes());
+    data.extend_from_slice(&z.to_be_bytes());
+    data.extend_from_slice(&[0; 24]);
+    data.extend_from_slice(&yaw.to_be_bytes());
+    data.extend_from_slice(&pitch.to_be_bytes());
+    data.extend_from_slice(&[0; 4]);
+    data
+}
+
+fn read_string<'a>(data: &'a [u8], cursor: &mut usize) -> io::Result<&'a str> {
+    let length = read_varint(data, cursor)?;
+    if length < 0 {
+        return Err(invalid("negative string length"));
+    }
+    let end = cursor
+        .checked_add(length as usize)
+        .ok_or_else(|| invalid("string cursor overflow"))?;
+    let bytes = data
+        .get(*cursor..end)
+        .ok_or_else(|| invalid("truncated string"))?;
+    *cursor = end;
+    std::str::from_utf8(bytes).map_err(|_| invalid("string is not valid UTF-8"))
+}
+
+fn game_mode_name(mode: i32) -> &'static str {
+    match mode {
+        1 => "Creative Mode",
+        2 => "Adventure Mode",
+        3 => "Spectator Mode",
+        _ => "Survival Mode",
+    }
+}
+
+fn handle_command(player: &Arc<Mutex<Player>>, command: &str) -> io::Result<()> {
+    let command = command.trim_start_matches('/');
+    let (name, writer, yaw, pitch) = {
+        let player = player
+            .lock()
+            .map_err(|_| invalid("player state lock poisoned"))?;
+        (
+            player.name.clone(),
+            Arc::clone(&player.writer),
+            player.yaw,
+            player.pitch,
+        )
+    };
+    let mut parts = command.split_whitespace();
+    let command_name = parts.next().unwrap_or("");
+    match command_name {
+        "help" => send_system_chat(
+            &writer,
+            "Commands: /help, /list, /op <player>, /deop <player>, /gamemode <mode>, /tp <x> <y> <z>, /say <message>",
+        )?,
+        "list" => {
+            let names: Vec<String> = {
+                let Ok(map) = players().lock() else {
+                    return Ok(());
+                };
+                map.values()
+                    .filter_map(|player| player.lock().ok().map(|player| player.name.clone()))
+                    .collect()
+            };
+            send_system_chat(
+                &writer,
+                &format!(
+                    "There are {} of a max of 20 players online: {}",
+                    names.len(),
+                    names.join(", ")
+                ),
+            )?;
+        }
+        "op" | "deop" => {
+            if !is_op(&name) {
+                return send_system_chat(
+                    &writer,
+                    "You do not have permission to use this command.",
+                );
+            }
+            let Some(target) = parts.next() else {
+                return send_system_chat(&writer, "Usage: /op <player>");
+            };
+            let enabled = command_name == "op";
+            set_op(target, enabled);
+            send_system_chat(
+                &writer,
+                &format!(
+                    "{} {} a server operator",
+                    if enabled { "Made" } else { "Removed" },
+                    target
+                ),
+            )?;
+        }
+        "gamemode" => {
+            if !is_op(&name) {
+                return send_system_chat(
+                    &writer,
+                    "You do not have permission to use this command.",
+                );
+            }
+            let Some(mode) = parts.next() else {
+                return send_system_chat(
+                    &writer,
+                    "Usage: /gamemode <survival|creative|adventure|spectator>",
+                );
+            };
+            let game_mode = match mode {
+                "survival" | "0" => 0,
+                "creative" | "1" => 1,
+                "adventure" | "2" => 2,
+                "spectator" | "3" => 3,
+                _ => {
+                    return send_system_chat(
+                        &writer,
+                        "Usage: /gamemode <survival|creative|adventure|spectator>",
+                    );
+                }
+            };
+            send_shared(&writer, &game_event_packet(3, game_mode as f32))?;
+            send_shared(&writer, &abilities_packet(game_mode))?;
+            send_system_chat(
+                &writer,
+                &format!("Set own game mode to {}", game_mode_name(game_mode)),
+            )?;
+        }
+        "tp" => {
+            if !is_op(&name) {
+                return send_system_chat(
+                    &writer,
+                    "You do not have permission to use this command.",
+                );
+            }
+            let target_x = parts.next().and_then(|value| value.parse::<f64>().ok());
+            let target_y = parts.next().and_then(|value| value.parse::<f64>().ok());
+            let target_z = parts.next().and_then(|value| value.parse::<f64>().ok());
+            let (Some(target_x), Some(target_y), Some(target_z)) = (target_x, target_y, target_z)
+            else {
+                return send_system_chat(&writer, "Usage: /tp <x> <y> <z>");
+            };
+            let teleport_id = NEXT_TELEPORT_ID.fetch_add(1, Ordering::Relaxed);
+            send_shared(
+                &writer,
+                &player_position_packet(teleport_id, target_x, target_y, target_z, yaw, pitch),
+            )?;
+            if let Ok(mut player) = player.lock() {
+                player.x = target_x;
+                player.y = target_y;
+                player.z = target_z;
+            }
+        }
+        "say" => {
+            if !is_op(&name) {
+                return send_system_chat(
+                    &writer,
+                    "You do not have permission to use this command.",
+                );
+            }
+            let message = command.strip_prefix("say").unwrap_or("").trim();
+            if !message.is_empty() {
+                send_system_chat_all(&format!("[Server] {message}"));
+            }
+        }
+        _ => send_system_chat(&writer, &format!("Unknown command: /{command_name}"))?,
+    }
+    Ok(())
+}
+
+fn handle_chat(player: &Arc<Mutex<Player>>, message: &str) {
+    if message.trim().is_empty() {
+        return;
+    }
+    let name = player
+        .lock()
+        .ok()
+        .map(|player| player.name.clone())
+        .unwrap_or_else(|| "?".to_owned());
+    send_system_chat_all(&format!("<{name}> {message}"));
 }
 
 fn broadcast_to_others(except_entity_id: i32, packets: &[Vec<u8>]) {
@@ -833,6 +1127,13 @@ fn play(stream: &mut TcpStream, name: &str, uuid: [u8; 16]) -> io::Result<()> {
         return Ok(());
     };
     let entity_id = NEXT_ENTITY_ID.fetch_add(1, Ordering::Relaxed);
+    ONLINE_PLAYERS.fetch_add(1, Ordering::Relaxed);
+    eprintln!("{} joined the game (entity {entity_id})", name);
+    let _player = PlayerGuard {
+        entity_id,
+        uuid,
+        name: name.to_owned(),
+    };
     let mut seen_chunks = HashSet::new();
     let mut position: (f64, f64, f64, f32, f32) = (0.5, -60.0, 0.5, 0.0, 0.0);
     for packet in &capture.play {
@@ -866,13 +1167,6 @@ fn play(stream: &mut TcpStream, name: &str, uuid: [u8; 16]) -> io::Result<()> {
         seen_chunks,
     }));
     register_player(Arc::clone(&player))?;
-    ONLINE_PLAYERS.fetch_add(1, Ordering::Relaxed);
-    eprintln!("{} joined the game (entity {entity_id})", name);
-    let _player = PlayerGuard {
-        entity_id,
-        uuid,
-        name: name.to_owned(),
-    };
     stream.set_read_timeout(Some(Duration::from_secs(1)))?;
     let mut last_keep_alive = Instant::now();
     let mut keep_alive_id = 0i64;
@@ -887,6 +1181,18 @@ fn play(stream: &mut TcpStream, name: &str, uuid: [u8; 16]) -> io::Result<()> {
                 let mut cursor = 0;
                 let packet_id = read_varint(&packet, &mut cursor)?;
                 if packet_id == SERVERBOUND_KEEP_ALIVE_PACKET_ID {
+                    continue;
+                }
+                if packet_id == CHAT_COMMAND_PACKET_ID {
+                    if let Ok(command) = read_string(&packet, &mut cursor) {
+                        let _ = handle_command(&player, command);
+                    }
+                    continue;
+                }
+                if packet_id == CHAT_PACKET_ID {
+                    if let Ok(message) = read_string(&packet, &mut cursor) {
+                        handle_chat(&player, message);
+                    }
                     continue;
                 }
                 if let Some(movement) = parse_movement(packet_id, &packet, cursor)? {
@@ -1344,5 +1650,46 @@ mod tests {
         cursor += 16;
         let name_len = read_varint(&packets[0], &mut cursor).unwrap() as usize;
         assert_eq!(&packets[0][cursor..cursor + name_len], b"Alice");
+    }
+
+    #[test]
+    fn system_chat_packet_encodes_text_component() {
+        let packet = system_chat_packet("Hi").unwrap();
+        assert_eq!(packet[0], 0x7C);
+        assert_eq!(packet[1], 0x0A);
+        assert_eq!(packet[2], 0x08);
+        assert!(packet.windows(6).any(|window| window == b"\x00\x04text"));
+        assert_eq!(&packet[packet.len() - 2..], &[0x00, 0x00]);
+    }
+
+    #[test]
+    fn game_mode_packets_have_expected_flags() {
+        assert_eq!(
+            game_event_packet(3, 1.0),
+            [0x27, 0x03, 0x3F, 0x80, 0x00, 0x00]
+        );
+        assert_eq!(abilities_packet(1)[..2], [0x41, 0x0D]);
+        assert_eq!(abilities_packet(0)[..2], [0x41, 0x00]);
+        assert_eq!(abilities_packet(3)[..2], [0x41, 0x07]);
+    }
+
+    #[test]
+    fn player_position_packet_has_fixed_layout() {
+        let packet = player_position_packet(5, 1.0, 2.0, 3.0, 90.0, 0.0);
+        assert_eq!(packet[0], 0x49);
+        assert_eq!(packet.len(), 62);
+        assert_eq!(packet[1], 5);
+        assert_eq!(&packet[2..10], &1.0f64.to_be_bytes());
+        assert_eq!(&packet[10..18], &2.0f64.to_be_bytes());
+        assert_eq!(&packet[18..26], &3.0f64.to_be_bytes());
+        assert_eq!(&packet[58..62], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn read_string_rejects_truncation() {
+        let mut cursor = 0;
+        assert_eq!(read_string(&[2, b'H', b'i'], &mut cursor).unwrap(), "Hi");
+        let mut cursor = 0;
+        assert!(read_string(&[3, b'H', b'i'], &mut cursor).is_err());
     }
 }
