@@ -193,8 +193,8 @@ def login_test(host, port):
                 sock.settimeout(15)
                 while True:
                     packet = read_frame(sock)
-                    if packet and packet[0] == 0x2C:
-                        send_frame(sock, b"\x1b" + packet[1:9])
+                    if packet and packet[0] == 0x2D:
+                        send_frame(sock, b"\x1c" + packet[1:9])
                         print("Play Keep Alive received and echoed")
                         break
                 sock.settimeout(3)

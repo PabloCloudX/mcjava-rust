@@ -1,10 +1,11 @@
 mod nbt;
 
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const PROTOCOL: i32 = 777;
@@ -16,7 +17,18 @@ static CAPTURE: OnceLock<Option<Capture>> = OnceLock::new();
 static REGISTRY: OnceLock<Option<Registry>> = OnceLock::new();
 const MAX_PACKET: usize = 1_048_576;
 const PLAY_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
-const PLAY_KEEP_ALIVE_PACKET_ID: i32 = 0x2C;
+const PLAY_KEEP_ALIVE_PACKET_ID: i32 = 0x2D;
+const SERVERBOUND_KEEP_ALIVE_PACKET_ID: i32 = 0x1C;
+const ADD_ENTITY_PACKET_ID: i32 = 0x01;
+const MOVE_ENTITY_POS_ROT_PACKET_ID: i32 = 0x37;
+const MOVE_ENTITY_ROT_PACKET_ID: i32 = 0x39;
+const PLAYER_INFO_REMOVE_PACKET_ID: i32 = 0x46;
+const PLAYER_INFO_UPDATE_PACKET_ID: i32 = 0x47;
+const REMOVE_ENTITIES_PACKET_ID: i32 = 0x4E;
+const SET_CHUNK_CACHE_CENTER_PACKET_ID: i32 = 0x60;
+const LEVEL_CHUNK_WITH_LIGHT_PACKET_ID: i32 = 0x2E;
+const PLAYER_ENTITY_TYPE_ID: i32 = 159;
+const VIEW_DISTANCE: i32 = 2;
 const OFFLINE_MODE_ENV: &str = "MC_OFFLINE_MODE";
 const ALLOW_PUBLIC_OFFLINE_ENV: &str = "MC_ALLOW_PUBLIC_OFFLINE";
 const CAPTURE_DIR_ENV: &str = "MC_CAPTURE_DIR";
@@ -176,7 +188,7 @@ fn login(stream: &mut TcpStream, protocol: i32) -> io::Result<()> {
         return Err(invalid("expected Login Acknowledged packet"));
     }
     configuration(stream)?;
-    play(stream, name)
+    play(stream, name, uuid)
 }
 
 fn send_login_success(stream: &mut TcpStream, name: &str, uuid: [u8; 16]) -> io::Result<()> {
@@ -202,17 +214,36 @@ struct Capture {
     before_known: Vec<Vec<u8>>,
     known: Vec<Vec<u8>>,
     play: Vec<Vec<u8>>,
+    chunks: Vec<(i32, i32, Vec<u8>)>,
 }
 
 impl Capture {
     fn load() -> io::Result<Self> {
         let directory = capture_dir();
+        let play = read_capture_stream(&directory.join("play_packets.bin"))?;
+        let chunks = play
+            .iter()
+            .filter_map(|packet| chunk_coords(packet).map(|(x, z)| (x, z, packet.clone())))
+            .collect();
         Ok(Self {
             before_known: read_capture_stream(&directory.join("config_before_known.bin"))?,
             known: read_capture_stream(&directory.join("config_known_packs.bin"))?,
-            play: read_capture_stream(&directory.join("play_packets.bin"))?,
+            play,
+            chunks,
         })
     }
+}
+
+fn chunk_coords(packet: &[u8]) -> Option<(i32, i32)> {
+    let mut cursor = 0;
+    if read_varint(packet, &mut cursor).ok()? != LEVEL_CHUNK_WITH_LIGHT_PACKET_ID
+        || cursor + 8 > packet.len()
+    {
+        return None;
+    }
+    let x = i32::from_be_bytes(packet[cursor..cursor + 4].try_into().ok()?);
+    let z = i32::from_be_bytes(packet[cursor + 4..cursor + 8].try_into().ok()?);
+    Some((x, z))
 }
 
 struct Registry {
@@ -321,7 +352,452 @@ fn configuration(stream: &mut TcpStream) -> io::Result<()> {
     Ok(())
 }
 
+struct Player {
+    entity_id: i32,
+    uuid: [u8; 16],
+    name: String,
+    x: f64,
+    y: f64,
+    z: f64,
+    yaw: f32,
+    pitch: f32,
+    writer: Arc<Mutex<TcpStream>>,
+    seen_chunks: HashSet<(i32, i32)>,
+}
+
+static PLAYERS: OnceLock<Mutex<HashMap<i32, Arc<Mutex<Player>>>>> = OnceLock::new();
+
+fn players() -> &'static Mutex<HashMap<i32, Arc<Mutex<Player>>>> {
+    PLAYERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn send_shared(writer: &Arc<Mutex<TcpStream>>, packet: &[u8]) -> io::Result<()> {
+    let mut stream = writer
+        .lock()
+        .map_err(|_| invalid("player writer lock poisoned"))?;
+    write_frame(&mut stream, packet)
+}
+
+fn send_to_all(packets: &[Vec<u8>]) {
+    let writers: Vec<Arc<Mutex<TcpStream>>> = {
+        let Ok(map) = players().lock() else {
+            return;
+        };
+        map.values()
+            .filter_map(|player| player.lock().ok().map(|player| Arc::clone(&player.writer)))
+            .collect()
+    };
+    for writer in writers {
+        for packet in packets {
+            let _ = send_shared(&writer, packet);
+        }
+    }
+}
+
+fn broadcast_to_others(except_entity_id: i32, packets: &[Vec<u8>]) {
+    let writers: Vec<Arc<Mutex<TcpStream>>> = {
+        let Ok(map) = players().lock() else {
+            return;
+        };
+        map.values()
+            .filter_map(|player| {
+                let player = player.lock().ok()?;
+                if player.entity_id == except_entity_id {
+                    None
+                } else {
+                    Some(Arc::clone(&player.writer))
+                }
+            })
+            .collect()
+    };
+    for writer in writers {
+        for packet in packets {
+            let _ = send_shared(&writer, packet);
+        }
+    }
+}
+
+fn angle_byte(angle: f32) -> u8 {
+    ((angle * 256.0 / 360.0) as i32) as u8
+}
+
+fn player_info_packets(uuid: &[u8; 16], name: &str) -> io::Result<Vec<Vec<u8>>> {
+    let mut add = vec![PLAYER_INFO_UPDATE_PACKET_ID as u8];
+    put_varint(0x01, &mut add);
+    put_varint(1, &mut add);
+    add.extend_from_slice(uuid);
+    put_string(name, &mut add)?;
+    put_varint(0, &mut add);
+
+    let mut game_mode = vec![PLAYER_INFO_UPDATE_PACKET_ID as u8];
+    put_varint(0x04, &mut game_mode);
+    put_varint(1, &mut game_mode);
+    game_mode.extend_from_slice(uuid);
+    put_varint(0, &mut game_mode);
+
+    let mut listed = vec![PLAYER_INFO_UPDATE_PACKET_ID as u8];
+    put_varint(0x08, &mut listed);
+    put_varint(1, &mut listed);
+    listed.extend_from_slice(uuid);
+    listed.push(1);
+
+    let mut latency = vec![PLAYER_INFO_UPDATE_PACKET_ID as u8];
+    put_varint(0x10, &mut latency);
+    put_varint(1, &mut latency);
+    latency.extend_from_slice(uuid);
+    put_varint(0, &mut latency);
+
+    Ok(vec![add, game_mode, listed, latency])
+}
+
+fn player_info_remove_packet(uuid: &[u8; 16]) -> Vec<u8> {
+    let mut data = vec![PLAYER_INFO_REMOVE_PACKET_ID as u8];
+    put_varint(1, &mut data);
+    data.extend_from_slice(uuid);
+    data
+}
+
+fn remove_entities_packet(entity_id: i32) -> Vec<u8> {
+    let mut data = vec![REMOVE_ENTITIES_PACKET_ID as u8];
+    put_varint(1, &mut data);
+    put_varint(entity_id, &mut data);
+    data
+}
+
+fn add_entity_packet(player: &Player) -> Vec<u8> {
+    let mut data = vec![ADD_ENTITY_PACKET_ID as u8];
+    put_varint(player.entity_id, &mut data);
+    data.extend_from_slice(&player.uuid);
+    put_varint(PLAYER_ENTITY_TYPE_ID, &mut data);
+    data.extend_from_slice(&player.x.to_be_bytes());
+    data.extend_from_slice(&player.y.to_be_bytes());
+    data.extend_from_slice(&player.z.to_be_bytes());
+    data.extend_from_slice(&[0; 6]);
+    data.push(angle_byte(player.pitch));
+    data.push(angle_byte(player.yaw));
+    data.push(angle_byte(player.yaw));
+    put_varint(0, &mut data);
+    data
+}
+
+fn delta_short(delta: f64) -> i16 {
+    (delta * 4096.0)
+        .round()
+        .clamp(i16::MIN as f64, i16::MAX as f64) as i16
+}
+
+fn move_entity_pos_rot_packet(
+    entity_id: i32,
+    dx: f64,
+    dy: f64,
+    dz: f64,
+    yaw: f32,
+    pitch: f32,
+    on_ground: bool,
+) -> Vec<u8> {
+    let mut data = vec![MOVE_ENTITY_POS_ROT_PACKET_ID as u8];
+    put_varint(entity_id, &mut data);
+    put_varint(2 | i32::from(on_ground), &mut data);
+    data.extend_from_slice(&delta_short(dx).to_be_bytes());
+    data.extend_from_slice(&delta_short(dy).to_be_bytes());
+    data.extend_from_slice(&delta_short(dz).to_be_bytes());
+    data.push(angle_byte(yaw));
+    data.push(angle_byte(pitch));
+    data
+}
+
+fn move_entity_rot_packet(entity_id: i32, yaw: f32, pitch: f32, on_ground: bool) -> Vec<u8> {
+    let mut data = vec![MOVE_ENTITY_ROT_PACKET_ID as u8];
+    put_varint(entity_id, &mut data);
+    data.push(u8::from(on_ground));
+    data.push(angle_byte(yaw));
+    data.push(angle_byte(pitch));
+    data
+}
+
+fn set_chunk_cache_center_packet(x: i32, z: i32) -> Vec<u8> {
+    let mut data = vec![SET_CHUNK_CACHE_CENTER_PACKET_ID as u8];
+    put_varint(x, &mut data);
+    put_varint(z, &mut data);
+    data
+}
+
+fn chunk_of(value: f64) -> i32 {
+    (value / 16.0).floor() as i32
+}
+
+fn read_f64(data: &[u8], cursor: &mut usize) -> io::Result<f64> {
+    let end = cursor
+        .checked_add(8)
+        .ok_or_else(|| invalid("double cursor overflow"))?;
+    let bytes = data
+        .get(*cursor..end)
+        .ok_or_else(|| invalid("truncated double"))?;
+    *cursor = end;
+    Ok(f64::from_be_bytes(
+        bytes
+            .try_into()
+            .map_err(|_| invalid("invalid double width"))?,
+    ))
+}
+
+fn read_f32(data: &[u8], cursor: &mut usize) -> io::Result<f32> {
+    let end = cursor
+        .checked_add(4)
+        .ok_or_else(|| invalid("float cursor overflow"))?;
+    let bytes = data
+        .get(*cursor..end)
+        .ok_or_else(|| invalid("truncated float"))?;
+    *cursor = end;
+    Ok(f32::from_be_bytes(
+        bytes
+            .try_into()
+            .map_err(|_| invalid("invalid float width"))?,
+    ))
+}
+
+fn parse_player_position(packet: &[u8]) -> io::Result<(f64, f64, f64, f32, f32)> {
+    let mut cursor = 0;
+    if read_varint(packet, &mut cursor)? != 0x49 {
+        return Err(invalid("expected player position packet"));
+    }
+    let _teleport_id = read_varint(packet, &mut cursor)?;
+    let x = read_f64(packet, &mut cursor)?;
+    let y = read_f64(packet, &mut cursor)?;
+    let z = read_f64(packet, &mut cursor)?;
+    let _delta_x = read_f64(packet, &mut cursor)?;
+    let _delta_y = read_f64(packet, &mut cursor)?;
+    let _delta_z = read_f64(packet, &mut cursor)?;
+    let yaw = read_f32(packet, &mut cursor)?;
+    let pitch = read_f32(packet, &mut cursor)?;
+    Ok((x, y, z, yaw, pitch))
+}
+
+fn patch_play_packet(packet: &[u8], entity_id: i32) -> io::Result<Vec<u8>> {
+    let mut cursor = 0;
+    let packet_id = read_varint(packet, &mut cursor)?;
+    match packet_id {
+        0x32 => {
+            if cursor + 4 > packet.len() {
+                return Err(invalid("truncated Play Login entity ID"));
+            }
+            let mut patched = Vec::with_capacity(packet.len());
+            patched.extend_from_slice(&packet[..cursor]);
+            patched.extend_from_slice(&entity_id.to_be_bytes());
+            patched.extend_from_slice(&packet[cursor + 4..]);
+            Ok(patched)
+        }
+        0x22 => {
+            if cursor + 4 > packet.len() {
+                return Err(invalid("truncated entity event entity ID"));
+            }
+            let mut patched = packet.to_vec();
+            patched[cursor..cursor + 4].copy_from_slice(&entity_id.to_be_bytes());
+            Ok(patched)
+        }
+        0x65 | 0x86 => {
+            let mut inner = cursor;
+            let _old_entity_id = read_varint(packet, &mut inner)?;
+            let mut patched = Vec::with_capacity(packet.len() + 2);
+            patched.extend_from_slice(&packet[..cursor]);
+            put_varint(entity_id, &mut patched);
+            patched.extend_from_slice(&packet[inner..]);
+            Ok(patched)
+        }
+        _ => Ok(packet.to_vec()),
+    }
+}
+
+struct Movement {
+    x: Option<f64>,
+    y: Option<f64>,
+    z: Option<f64>,
+    yaw: Option<f32>,
+    pitch: Option<f32>,
+    on_ground: bool,
+}
+
+fn parse_movement(
+    packet_id: i32,
+    packet: &[u8],
+    mut cursor: usize,
+) -> io::Result<Option<Movement>> {
+    let mut movement = Movement {
+        x: None,
+        y: None,
+        z: None,
+        yaw: None,
+        pitch: None,
+        on_ground: false,
+    };
+    match packet_id {
+        0x1e => {
+            movement.x = Some(read_f64(packet, &mut cursor)?);
+            movement.y = Some(read_f64(packet, &mut cursor)?);
+            movement.z = Some(read_f64(packet, &mut cursor)?);
+        }
+        0x1f => {
+            movement.x = Some(read_f64(packet, &mut cursor)?);
+            movement.y = Some(read_f64(packet, &mut cursor)?);
+            movement.z = Some(read_f64(packet, &mut cursor)?);
+            movement.yaw = Some(read_f32(packet, &mut cursor)?);
+            movement.pitch = Some(read_f32(packet, &mut cursor)?);
+        }
+        0x20 => {
+            movement.yaw = Some(read_f32(packet, &mut cursor)?);
+            movement.pitch = Some(read_f32(packet, &mut cursor)?);
+        }
+        0x21 => {}
+        _ => return Ok(None),
+    }
+    let flags = *packet
+        .get(cursor)
+        .ok_or_else(|| invalid("truncated movement flags"))?;
+    movement.on_ground = flags & 1 != 0;
+    Ok(Some(movement))
+}
+
+fn update_player_movement(player: &Arc<Mutex<Player>>, movement: Movement) {
+    let (
+        entity_id,
+        writer,
+        moved,
+        old_chunk,
+        new_chunk,
+        dx,
+        dy,
+        dz,
+        yaw,
+        pitch,
+        on_ground,
+        chunk_packets,
+    ) = {
+        let Ok(mut player) = player.lock() else {
+            return;
+        };
+        let old_x = player.x;
+        let old_y = player.y;
+        let old_z = player.z;
+        let old_yaw = player.yaw;
+        let old_pitch = player.pitch;
+        let new_x = movement.x.unwrap_or(old_x);
+        let new_y = movement.y.unwrap_or(old_y);
+        let new_z = movement.z.unwrap_or(old_z);
+        let new_yaw = movement.yaw.unwrap_or(old_yaw);
+        let new_pitch = movement.pitch.unwrap_or(old_pitch);
+        let moved = (new_x - old_x).abs() > f64::EPSILON
+            || (new_y - old_y).abs() > f64::EPSILON
+            || (new_z - old_z).abs() > f64::EPSILON
+            || (new_yaw - old_yaw).abs() > f32::EPSILON
+            || (new_pitch - old_pitch).abs() > f32::EPSILON;
+        if !moved {
+            return;
+        }
+        player.x = new_x;
+        player.y = new_y;
+        player.z = new_z;
+        player.yaw = new_yaw;
+        player.pitch = new_pitch;
+        let old_chunk = (chunk_of(old_x), chunk_of(old_z));
+        let new_chunk = (chunk_of(new_x), chunk_of(new_z));
+        let mut chunk_packets = Vec::new();
+        if new_chunk != old_chunk
+            && let Some(capture) = capture()
+        {
+            for (cx, cz, packet) in &capture.chunks {
+                if (cx - new_chunk.0).abs() <= VIEW_DISTANCE
+                    && (cz - new_chunk.1).abs() <= VIEW_DISTANCE
+                    && player.seen_chunks.insert((*cx, *cz))
+                {
+                    chunk_packets.push(packet.clone());
+                }
+            }
+        }
+        (
+            player.entity_id,
+            Arc::clone(&player.writer),
+            moved,
+            old_chunk,
+            new_chunk,
+            new_x - old_x,
+            new_y - old_y,
+            new_z - old_z,
+            new_yaw,
+            new_pitch,
+            movement.on_ground,
+            chunk_packets,
+        )
+    };
+    if !moved {
+        return;
+    }
+    if dx.abs() <= 8.0 && dy.abs() <= 8.0 && dz.abs() <= 8.0 {
+        let packet = move_entity_pos_rot_packet(entity_id, dx, dy, dz, yaw, pitch, on_ground);
+        broadcast_to_others(entity_id, &[packet]);
+    } else if (yaw - 0.0).abs() > f32::EPSILON {
+        let packet = move_entity_rot_packet(entity_id, yaw, pitch, on_ground);
+        broadcast_to_others(entity_id, &[packet]);
+    }
+    if new_chunk != old_chunk {
+        let _ = send_shared(
+            &writer,
+            &set_chunk_cache_center_packet(new_chunk.0, new_chunk.1),
+        );
+        for packet in chunk_packets {
+            let _ = send_shared(&writer, &packet);
+        }
+    }
+}
+
+fn register_player(player: Arc<Mutex<Player>>) -> io::Result<()> {
+    let (entity_id, uuid, name, writer, add_self) = {
+        let player = player
+            .lock()
+            .map_err(|_| invalid("player state lock poisoned"))?;
+        (
+            player.entity_id,
+            player.uuid,
+            player.name.clone(),
+            Arc::clone(&player.writer),
+            add_entity_packet(&player),
+        )
+    };
+    let existing: Vec<Arc<Mutex<Player>>> = {
+        let map = players()
+            .lock()
+            .map_err(|_| invalid("player map lock poisoned"))?;
+        map.values().cloned().collect()
+    };
+    {
+        let mut map = players()
+            .lock()
+            .map_err(|_| invalid("player map lock poisoned"))?;
+        map.insert(entity_id, Arc::clone(&player));
+    }
+    let self_info = player_info_packets(&uuid, &name)?;
+    send_to_all(&self_info);
+    broadcast_to_others(entity_id, &[add_self]);
+    for other in existing {
+        let (other_info, add_other) = {
+            let other = other
+                .lock()
+                .map_err(|_| invalid("player state lock poisoned"))?;
+            (
+                player_info_packets(&other.uuid, &other.name)?,
+                add_entity_packet(&other),
+            )
+        };
+        for packet in &other_info {
+            send_shared(&writer, packet)?;
+        }
+        send_shared(&writer, &add_other)?;
+    }
+    Ok(())
+}
+
 struct PlayerGuard {
+    entity_id: i32,
+    uuid: [u8; 16],
     name: String,
 }
 
@@ -329,6 +805,19 @@ impl Drop for PlayerGuard {
     fn drop(&mut self) {
         ONLINE_PLAYERS.fetch_sub(1, Ordering::Relaxed);
         eprintln!("{} left the game", self.name);
+        let removed = {
+            let Ok(mut map) = players().lock() else {
+                return;
+            };
+            map.remove(&self.entity_id)
+        };
+        if removed.is_some() {
+            let packets = [
+                player_info_remove_packet(&self.uuid),
+                remove_entities_packet(self.entity_id),
+            ];
+            broadcast_to_others(self.entity_id, &packets);
+        }
     }
 }
 
@@ -339,39 +828,49 @@ fn keep_alive_packet(id: i64) -> Vec<u8> {
     data
 }
 
-fn patch_login_entity_id(packet: &[u8], entity_id: i32) -> io::Result<Vec<u8>> {
-    let mut cursor = 0;
-    let packet_id = read_varint(packet, &mut cursor)?;
-    if packet_id != 0x32 {
-        return Ok(packet.to_vec());
-    }
-    if cursor + 4 > packet.len() {
-        return Err(invalid("truncated Play Login entity ID"));
-    }
-    let mut patched = Vec::with_capacity(packet.len());
-    patched.extend_from_slice(&packet[..cursor]);
-    patched.extend_from_slice(&entity_id.to_be_bytes());
-    patched.extend_from_slice(&packet[cursor + 4..]);
-    Ok(patched)
-}
-
-fn play(stream: &mut TcpStream, name: &str) -> io::Result<()> {
+fn play(stream: &mut TcpStream, name: &str, uuid: [u8; 16]) -> io::Result<()> {
     let Some(capture) = capture() else {
         return Ok(());
     };
     let entity_id = NEXT_ENTITY_ID.fetch_add(1, Ordering::Relaxed);
-    let mut first = true;
+    let mut seen_chunks = HashSet::new();
+    let mut position: (f64, f64, f64, f32, f32) = (0.5, -60.0, 0.5, 0.0, 0.0);
     for packet in &capture.play {
-        if first {
-            write_frame(stream, &patch_login_entity_id(packet, entity_id)?)?;
-            first = false;
-        } else {
-            write_frame(stream, packet)?;
+        let mut cursor = 0;
+        let packet_id = read_varint(packet, &mut cursor)?;
+        if packet_id == PLAYER_INFO_UPDATE_PACKET_ID {
+            continue;
         }
+        if packet_id == 0x49
+            && let Ok(parsed) = parse_player_position(packet)
+        {
+            position = parsed;
+        }
+        let patched = patch_play_packet(packet, entity_id)?;
+        if let Some(coords) = chunk_coords(&patched) {
+            seen_chunks.insert(coords);
+        }
+        write_frame(stream, &patched)?;
     }
+    let writer = Arc::new(Mutex::new(stream.try_clone()?));
+    let player = Arc::new(Mutex::new(Player {
+        entity_id,
+        uuid,
+        name: name.to_owned(),
+        x: position.0,
+        y: position.1,
+        z: position.2,
+        yaw: position.3,
+        pitch: position.4,
+        writer: Arc::clone(&writer),
+        seen_chunks,
+    }));
+    register_player(Arc::clone(&player))?;
     ONLINE_PLAYERS.fetch_add(1, Ordering::Relaxed);
     eprintln!("{} joined the game (entity {entity_id})", name);
     let _player = PlayerGuard {
+        entity_id,
+        uuid,
         name: name.to_owned(),
     };
     stream.set_read_timeout(Some(Duration::from_secs(1)))?;
@@ -379,12 +878,22 @@ fn play(stream: &mut TcpStream, name: &str) -> io::Result<()> {
     let mut keep_alive_id = 0i64;
     loop {
         if last_keep_alive.elapsed() >= PLAY_KEEP_ALIVE_INTERVAL {
-            write_frame(stream, &keep_alive_packet(keep_alive_id))?;
+            send_shared(&writer, &keep_alive_packet(keep_alive_id))?;
             keep_alive_id = keep_alive_id.wrapping_add(1);
             last_keep_alive = Instant::now();
         }
         match read_frame(stream) {
-            Ok(_) => continue,
+            Ok(packet) => {
+                let mut cursor = 0;
+                let packet_id = read_varint(&packet, &mut cursor)?;
+                if packet_id == SERVERBOUND_KEEP_ALIVE_PACKET_ID {
+                    continue;
+                }
+                if let Some(movement) = parse_movement(packet_id, &packet, cursor)? {
+                    update_player_movement(&player, movement);
+                }
+                continue;
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -737,14 +1246,14 @@ mod tests {
     #[test]
     fn keep_alive_packet_encodes_id() {
         let packet = keep_alive_packet(0x0102_0304_0506_0708);
-        assert_eq!(packet[0], 0x2C);
+        assert_eq!(packet[0], 0x2D);
         assert_eq!(&packet[1..], &0x0102_0304_0506_0708i64.to_be_bytes());
     }
 
     #[test]
     fn patches_play_login_entity_id() {
         let original = [0x32, 0, 0, 0, 1, 0xAA, 0xBB];
-        let patched = patch_login_entity_id(&original, 300).unwrap();
+        let patched = patch_play_packet(&original, 300).unwrap();
         assert_eq!(&patched[..1], &[0x32]);
         assert_eq!(&patched[1..5], &300i32.to_be_bytes());
         assert_eq!(&patched[5..], &[0xAA, 0xBB]);
@@ -756,5 +1265,84 @@ mod tests {
         ONLINE_PLAYERS.store(3, Ordering::Relaxed);
         assert!(status_json().contains("\"online\":3"));
         ONLINE_PLAYERS.store(previous, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn chunk_of_negative_positions_uses_floor() {
+        assert_eq!(chunk_of(-0.5), -1);
+        assert_eq!(chunk_of(0.5), 0);
+        assert_eq!(chunk_of(-16.0), -1);
+        assert_eq!(chunk_of(-16.1), -2);
+        assert_eq!(chunk_of(15.9), 0);
+        assert_eq!(chunk_of(16.0), 1);
+    }
+
+    #[test]
+    fn patches_other_entity_id_references() {
+        let entity_event = patch_play_packet(&[0x22, 0, 0, 0, 1, 0x18], 7).unwrap();
+        assert_eq!(entity_event, [0x22, 0, 0, 0, 7, 0x18]);
+        let entity_data = patch_play_packet(&[0x65, 1, 0x09, 0x03], 7).unwrap();
+        assert_eq!(entity_data, [0x65, 7, 0x09, 0x03]);
+        let attributes = patch_play_packet(&[0x86, 0x01, 0x03], 7).unwrap();
+        assert_eq!(attributes, [0x86, 0x01, 7]);
+    }
+
+    #[test]
+    fn move_entity_packet_encodes_fixed_point_delta() {
+        let packet = move_entity_pos_rot_packet(3, 1.0, -0.5, 0.0, 90.0, 0.0, true);
+        assert_eq!(packet[0], 0x37);
+        let mut cursor = 1;
+        assert_eq!(read_varint(&packet, &mut cursor).unwrap(), 3);
+        assert_eq!(read_varint(&packet, &mut cursor).unwrap(), 3);
+        let dx = i16::from_be_bytes(packet[cursor..cursor + 2].try_into().unwrap());
+        let dy = i16::from_be_bytes(packet[cursor + 2..cursor + 4].try_into().unwrap());
+        assert_eq!(dx, 4096);
+        assert_eq!(dy, -2048);
+        assert_eq!(&packet[cursor + 6..], &[64, 0]);
+    }
+
+    #[test]
+    fn add_entity_packet_uses_player_type_id() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let writer = TcpStream::connect(address).unwrap();
+        let _accepted = listener.accept().unwrap();
+        let player = Player {
+            entity_id: 5,
+            uuid: [7; 16],
+            name: "Alice".to_owned(),
+            x: 1.5,
+            y: -60.0,
+            z: 2.5,
+            yaw: 90.0,
+            pitch: 0.0,
+            writer: Arc::new(Mutex::new(writer)),
+            seen_chunks: HashSet::new(),
+        };
+        let packet = add_entity_packet(&player);
+        assert_eq!(packet[0], 0x01);
+        let mut cursor = 1;
+        assert_eq!(read_varint(&packet, &mut cursor).unwrap(), 5);
+        assert_eq!(&packet[cursor..cursor + 16], &[7; 16]);
+        cursor += 16;
+        assert_eq!(
+            read_varint(&packet, &mut cursor).unwrap(),
+            PLAYER_ENTITY_TYPE_ID
+        );
+    }
+
+    #[test]
+    fn player_info_packets_include_name_and_uuid() {
+        let uuid = [9; 16];
+        let packets = player_info_packets(&uuid, "Alice").unwrap();
+        assert_eq!(packets.len(), 4);
+        assert_eq!(packets[0][0], 0x47);
+        let mut cursor = 1;
+        assert_eq!(read_varint(&packets[0], &mut cursor).unwrap(), 0x01);
+        assert_eq!(read_varint(&packets[0], &mut cursor).unwrap(), 1);
+        assert_eq!(&packets[0][cursor..cursor + 16], &uuid);
+        cursor += 16;
+        let name_len = read_varint(&packets[0], &mut cursor).unwrap() as usize;
+        assert_eq!(&packets[0][cursor..cursor + name_len], b"Alice");
     }
 }
