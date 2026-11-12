@@ -345,11 +345,13 @@ fn patch_login_entity_id(packet: &[u8], entity_id: i32) -> io::Result<Vec<u8>> {
     if packet_id != 0x32 {
         return Ok(packet.to_vec());
     }
-    let _old_entity_id = read_varint(packet, &mut cursor)?;
-    let mut patched = Vec::with_capacity(packet.len() + 5);
-    put_varint(packet_id, &mut patched);
-    put_varint(entity_id, &mut patched);
-    patched.extend_from_slice(&packet[cursor..]);
+    if cursor + 4 > packet.len() {
+        return Err(invalid("truncated Play Login entity ID"));
+    }
+    let mut patched = Vec::with_capacity(packet.len());
+    patched.extend_from_slice(&packet[..cursor]);
+    patched.extend_from_slice(&entity_id.to_be_bytes());
+    patched.extend_from_slice(&packet[cursor + 4..]);
     Ok(patched)
 }
 
@@ -741,11 +743,11 @@ mod tests {
 
     #[test]
     fn patches_play_login_entity_id() {
-        let patched = patch_login_entity_id(&[0x32, 0, 0xAA, 0xBB], 300).unwrap();
-        let mut cursor = 0;
-        assert_eq!(read_varint(&patched, &mut cursor).unwrap(), 0x32);
-        assert_eq!(read_varint(&patched, &mut cursor).unwrap(), 300);
-        assert_eq!(&patched[cursor..], &[0xAA, 0xBB]);
+        let original = [0x32, 0, 0, 0, 1, 0xAA, 0xBB];
+        let patched = patch_login_entity_id(&original, 300).unwrap();
+        assert_eq!(&patched[..1], &[0x32]);
+        assert_eq!(&patched[1..5], &300i32.to_be_bytes());
+        assert_eq!(&patched[5..], &[0xAA, 0xBB]);
     }
 
     #[test]
