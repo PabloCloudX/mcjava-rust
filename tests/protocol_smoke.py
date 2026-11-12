@@ -190,6 +190,14 @@ def login_test(host, port):
                         f"expected Play Login packet, got {play_login[:8]!r}"
                     )
                 print("Configuration replay completed; Play Login received")
+                sock.settimeout(15)
+                while True:
+                    packet = read_frame(sock)
+                    if packet and packet[0] == 0x2C:
+                        send_frame(sock, b"\x1b" + packet[1:9])
+                        print("Play Keep Alive received and echoed")
+                        break
+                sock.settimeout(3)
         else:
             expect_disconnect(response, 0, "Offline login is disabled")
             print("offline login disabled; expected Login Disconnect received")

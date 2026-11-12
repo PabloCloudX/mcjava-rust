@@ -6,7 +6,7 @@ Native Rust project targeting Minecraft Java Edition 26.3 (protocol 777). The ta
 
 ## Current scope
 
-The current vertical slice implements Minecraft's TCP handshake, status exchange, offline Login, Configuration, and the initial Play packet sequence. With `MC_OFFLINE_MODE=1` on a trusted private network, it sends offline Login Success. If a local capture is installed with `MC_CAPTURE_DIR`, it replays the vanilla Configuration packets and the initial Play Login/chunk packets, so a real client can enter the world. Without a capture it falls back to an explicit Configuration Disconnect. Offline mode does not authenticate players and allows identity spoofing. It is disabled by default. A public bind is refused unless `MC_ALLOW_PUBLIC_OFFLINE=1` is also set; even then the server prints a warning. Use that override only if you accept spoofing risk. Login also rejects protocol versions other than 777 and usernames outside the ASCII `[A-Za-z0-9_]` set. Gameplay logic, movement, and chunk streaming are not implemented beyond the captured initial packets.
+The current vertical slice implements Minecraft's TCP handshake, status exchange, offline Login, Configuration, and the initial Play packet sequence. With `MC_OFFLINE_MODE=1` on a trusted private network, it sends offline Login Success. If local registry and play data are installed with `MC_CAPTURE_DIR`, it sends the vanilla registry/tags data and the initial Play Login/chunk packets, so a real client can enter the world. Each connection gets its own entity ID, the server sends Play Keep Alive every 10 seconds, and the status player count tracks clients that reached Play. Without a capture it falls back to an explicit Configuration Disconnect. Offline mode does not authenticate players and allows identity spoofing. It is disabled by default. A public bind is refused unless `MC_ALLOW_PUBLIC_OFFLINE=1` is also set; even then the server prints a warning. Use that override only if you accept spoofing risk. Login also rejects protocol versions other than 777 and usernames outside the ASCII `[A-Za-z0-9_]` set. Gameplay logic, movement, and chunk streaming beyond the initial chunk slice are not implemented.
 
 ## Build and tests
 
@@ -43,13 +43,13 @@ The default is `127.0.0.1:25565`, so it is only reachable locally unless you exp
 MC_OFFLINE_MODE=1 ./minecraft-rust 127.0.0.1:25565
 ```
 
-An offline bind to a non-loopback address is refused unless you also set `MC_ALLOW_PUBLIC_OFFLINE=1`. To let clients enter Play, point `MC_CAPTURE_DIR` at a directory containing the four captured streams:
+An offline bind to a non-loopback address is refused unless you also set `MC_ALLOW_PUBLIC_OFFLINE=1`. To let clients enter Play, point `MC_CAPTURE_DIR` at a directory containing the five data files:
 
 ```text
 MC_OFFLINE_MODE=1 MC_CAPTURE_DIR=./capture ./minecraft-rust 127.0.0.1:25565
 ```
 
-The capture files are locally generated reference data and are not committed. Without them the server still serves status and login, then disconnects during Configuration. The listener must not be treated as a finished production server.
+The data files are locally generated reference data and are not committed. `config_before_known.bin`, `config_known_packs.bin`, `registry.bin`, `tags.bin`, and `play_packets.bin` are required; `config_after_known.bin` is no longer read. Without them the server still serves status and login, then disconnects during Configuration. The listener must not be treated as a finished production server.
 
 ## Compatibility and licensing
 

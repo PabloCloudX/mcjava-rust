@@ -4,15 +4,19 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 const PROTOCOL: i32 = 777;
 const MAX_CONNECTIONS: usize = 128;
 static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+static ONLINE_PLAYERS: AtomicUsize = AtomicUsize::new(0);
+static NEXT_ENTITY_ID: AtomicI32 = AtomicI32::new(1);
 static CAPTURE: OnceLock<Option<Capture>> = OnceLock::new();
+static REGISTRY: OnceLock<Option<Registry>> = OnceLock::new();
 const MAX_PACKET: usize = 1_048_576;
-const STATUS_JSON: &str = r#"{"version":{"name":"26.3","protocol":777},"players":{"max":0,"online":0,"sample":[]},"description":{"text":"Minecraft Rust Server 26.3"}}"#;
+const PLAY_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const PLAY_KEEP_ALIVE_PACKET_ID: i32 = 0x2C;
 const OFFLINE_MODE_ENV: &str = "MC_OFFLINE_MODE";
 const ALLOW_PUBLIC_OFFLINE_ENV: &str = "MC_ALLOW_PUBLIC_OFFLINE";
 const CAPTURE_DIR_ENV: &str = "MC_CAPTURE_DIR";
@@ -47,14 +51,14 @@ pub fn run(address: &str) -> io::Result<()> {
     eprintln!(
         "Independent project. Not affiliated with, endorsed by, or contributed to by Mojang or Microsoft."
     );
-    if capture().is_some() {
+    if capture().is_some() && registry().is_some() {
         eprintln!(
-            "Configuration and Play packet replay enabled from {}.",
+            "Configuration registry and Play replay enabled from {}.",
             capture_dir().display()
         );
     } else {
         eprintln!(
-            "Configuration/Play capture not found at {}; connections will disconnect after login.",
+            "Configuration/Play data not found at {}; connections will disconnect after login.",
             capture_dir().display()
         );
     }
@@ -172,7 +176,7 @@ fn login(stream: &mut TcpStream, protocol: i32) -> io::Result<()> {
         return Err(invalid("expected Login Acknowledged packet"));
     }
     configuration(stream)?;
-    play(stream)
+    play(stream, name)
 }
 
 fn send_login_success(stream: &mut TcpStream, name: &str, uuid: [u8; 16]) -> io::Result<()> {
@@ -197,7 +201,6 @@ fn send_configuration_disconnect(stream: &mut TcpStream, reason: &str) -> io::Re
 struct Capture {
     before_known: Vec<Vec<u8>>,
     known: Vec<Vec<u8>>,
-    after_known: Vec<Vec<u8>>,
     play: Vec<Vec<u8>>,
 }
 
@@ -207,8 +210,26 @@ impl Capture {
         Ok(Self {
             before_known: read_capture_stream(&directory.join("config_before_known.bin"))?,
             known: read_capture_stream(&directory.join("config_known_packs.bin"))?,
-            after_known: read_capture_stream(&directory.join("config_after_known.bin"))?,
             play: read_capture_stream(&directory.join("play_packets.bin"))?,
+        })
+    }
+}
+
+struct Registry {
+    data: Vec<Vec<u8>>,
+    tags: Vec<u8>,
+}
+
+impl Registry {
+    fn load() -> io::Result<Self> {
+        let directory = capture_dir();
+        let tags = read_capture_stream(&directory.join("tags.bin"))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| invalid("empty tags capture"))?;
+        Ok(Self {
+            data: read_capture_stream(&directory.join("registry.bin"))?,
+            tags,
         })
     }
 }
@@ -221,6 +242,10 @@ fn capture_dir() -> PathBuf {
 
 fn capture() -> &'static Option<Capture> {
     CAPTURE.get_or_init(|| Capture::load().ok())
+}
+
+fn registry() -> &'static Option<Registry> {
+    REGISTRY.get_or_init(|| Registry::load().ok())
 }
 
 fn read_capture_stream(path: &Path) -> io::Result<Vec<Vec<u8>>> {
@@ -259,6 +284,12 @@ fn configuration(stream: &mut TcpStream) -> io::Result<()> {
             "Configuration and gameplay are not implemented yet",
         );
     };
+    let Some(registry) = registry() else {
+        return send_configuration_disconnect(
+            stream,
+            "Configuration and gameplay are not implemented yet",
+        );
+    };
     send_packets(stream, &capture.before_known)?;
     send_packets(stream, &capture.known)?;
     loop {
@@ -274,7 +305,9 @@ fn configuration(stream: &mut TcpStream) -> io::Result<()> {
             }
         }
     }
-    send_packets(stream, &capture.after_known)?;
+    send_packets(stream, &registry.data)?;
+    write_frame(stream, &registry.tags)?;
+    write_frame(stream, &[3])?;
     loop {
         let packet = read_frame(stream)?;
         let mut cursor = 0;
@@ -288,13 +321,66 @@ fn configuration(stream: &mut TcpStream) -> io::Result<()> {
     Ok(())
 }
 
-fn play(stream: &mut TcpStream) -> io::Result<()> {
+struct PlayerGuard {
+    name: String,
+}
+
+impl Drop for PlayerGuard {
+    fn drop(&mut self) {
+        ONLINE_PLAYERS.fetch_sub(1, Ordering::Relaxed);
+        eprintln!("{} left the game", self.name);
+    }
+}
+
+fn keep_alive_packet(id: i64) -> Vec<u8> {
+    let mut data = Vec::with_capacity(9);
+    put_varint(PLAY_KEEP_ALIVE_PACKET_ID, &mut data);
+    data.extend_from_slice(&id.to_be_bytes());
+    data
+}
+
+fn patch_login_entity_id(packet: &[u8], entity_id: i32) -> io::Result<Vec<u8>> {
+    let mut cursor = 0;
+    let packet_id = read_varint(packet, &mut cursor)?;
+    if packet_id != 0x32 {
+        return Ok(packet.to_vec());
+    }
+    let _old_entity_id = read_varint(packet, &mut cursor)?;
+    let mut patched = Vec::with_capacity(packet.len() + 5);
+    put_varint(packet_id, &mut patched);
+    put_varint(entity_id, &mut patched);
+    patched.extend_from_slice(&packet[cursor..]);
+    Ok(patched)
+}
+
+fn play(stream: &mut TcpStream, name: &str) -> io::Result<()> {
     let Some(capture) = capture() else {
         return Ok(());
     };
-    send_packets(stream, &capture.play)?;
-    eprintln!("client entered Play state using captured vanilla packets");
+    let entity_id = NEXT_ENTITY_ID.fetch_add(1, Ordering::Relaxed);
+    let mut first = true;
+    for packet in &capture.play {
+        if first {
+            write_frame(stream, &patch_login_entity_id(packet, entity_id)?)?;
+            first = false;
+        } else {
+            write_frame(stream, packet)?;
+        }
+    }
+    ONLINE_PLAYERS.fetch_add(1, Ordering::Relaxed);
+    eprintln!("{} joined the game (entity {entity_id})", name);
+    let _player = PlayerGuard {
+        name: name.to_owned(),
+    };
+    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+    let mut last_keep_alive = Instant::now();
+    let mut keep_alive_id = 0i64;
     loop {
+        if last_keep_alive.elapsed() >= PLAY_KEEP_ALIVE_INTERVAL {
+            write_frame(stream, &keep_alive_packet(keep_alive_id))?;
+            keep_alive_id = keep_alive_id.wrapping_add(1);
+            last_keep_alive = Instant::now();
+        }
         match read_frame(stream) {
             Ok(_) => continue,
             Err(error)
@@ -318,6 +404,13 @@ fn play(stream: &mut TcpStream) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
+}
+
+fn status_json() -> String {
+    format!(
+        r#"{{"version":{{"name":"26.3","protocol":777}},"players":{{"max":20,"online":{}}},"description":{{"text":"Minecraft Rust Server 26.3"}}}}"#,
+        ONLINE_PLAYERS.load(Ordering::Relaxed)
+    )
 }
 
 fn parse_login_start(packet: &[u8]) -> io::Result<(&str, [u8; 16])> {
@@ -356,7 +449,7 @@ fn status(stream: &mut TcpStream) -> io::Result<()> {
         return Err(invalid("expected status request"));
     }
     let mut response = vec![0];
-    put_string(STATUS_JSON, &mut response)?;
+    put_string(&status_json(), &mut response)?;
     write_frame(stream, &response)?;
 
     let ping = read_frame(stream)?;
@@ -637,5 +730,29 @@ mod tests {
             "{\"text\":\"quote \\\" slash \\\\ newline\\n tab\\t nul\\u0000\"}"
         );
         assert_eq!(text_component("é"), "{\"text\":\"é\"}");
+    }
+
+    #[test]
+    fn keep_alive_packet_encodes_id() {
+        let packet = keep_alive_packet(0x0102_0304_0506_0708);
+        assert_eq!(packet[0], 0x2C);
+        assert_eq!(&packet[1..], &0x0102_0304_0506_0708i64.to_be_bytes());
+    }
+
+    #[test]
+    fn patches_play_login_entity_id() {
+        let patched = patch_login_entity_id(&[0x32, 0, 0xAA, 0xBB], 300).unwrap();
+        let mut cursor = 0;
+        assert_eq!(read_varint(&patched, &mut cursor).unwrap(), 0x32);
+        assert_eq!(read_varint(&patched, &mut cursor).unwrap(), 300);
+        assert_eq!(&patched[cursor..], &[0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn status_json_reports_online_players() {
+        let previous = ONLINE_PLAYERS.load(Ordering::Relaxed);
+        ONLINE_PLAYERS.store(3, Ordering::Relaxed);
+        assert!(status_json().contains("\"online\":3"));
+        ONLINE_PLAYERS.store(previous, Ordering::Relaxed);
     }
 }
