@@ -5,3 +5,5 @@ world/
 /auth
 /pass
 /.local/
+
+logs/
